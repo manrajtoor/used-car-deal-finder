@@ -525,7 +525,8 @@ func TestCrawl(t *testing.T) {
 		t.Run("coverage "+cv.name, func(t *testing.T) {
 			f := &fakeFetcher{feed: feed([][]any{item(itemOpts{id: 1})}, cv.total)}
 			var ev source.PageEvent
-			r, err := New(f, WithReadPages(0)).Search(ctx, listing.Query{Geo: "montreal", SellerType: "P"}, func(e source.PageEvent) { ev = e })
+			// One feed page: the band walk has its own test (TestBandWalk).
+			r, err := New(f, WithReadPages(0), WithMaxFeedRequests(1)).Search(ctx, listing.Query{Geo: "montreal", SellerType: "P"}, func(e source.PageEvent) { ev = e })
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -577,4 +578,114 @@ func TestHTTPAdapterSendsFeedHeaders(t *testing.T) {
 	if len(client.Headers) != 1 {
 		t.Errorf("shared client was mutated: %v", client.Headers)
 	}
+}
+
+// bandSite serves `n` cars priced 0..n*step, honouring min_price/max_price
+// and the PageSize cap like the real feed. Never the network.
+type bandSite struct {
+	n, step int
+	urls    []string
+}
+
+func (b *bandSite) Fetch(_ context.Context, u string) (string, error) {
+	b.urls = append(b.urls, u)
+	q, _ := url.Parse(u)
+	lo, hi := 0, 1<<30
+	if v := q.Query().Get("min_price"); v != "" {
+		fmt.Sscan(v, &lo)
+	}
+	if v := q.Query().Get("max_price"); v != "" {
+		fmt.Sscan(v, &hi)
+	}
+	var items [][]any
+	total := 0
+	for i := 0; i < b.n; i++ {
+		price := i * b.step
+		if price < lo || price > hi {
+			continue
+		}
+		total++
+		if len(items) < PageSize {
+			items = append(items, item(itemOpts{id: i + 1, price: price, place: "4:1~40.6~-73.9"})) // decodeBlock's newyork
+		}
+	}
+	return feed(items, total), nil
+}
+
+func TestPlanBands(t *testing.T) {
+	var sample []float64
+	for i := 0; i < 360; i++ {
+		sample = append(sample, float64(i*100))
+	}
+	bands := PlanBands(sample, 1500, 300, 40_000)
+	if len(bands) != 5 || bands[0].Lo != 0 || bands[len(bands)-1].Hi != 40_000 {
+		t.Fatalf("bands = %v", bands)
+	}
+	for i := 1; i < len(bands); i++ {
+		if bands[i].Lo != bands[i-1].Hi+1 {
+			t.Errorf("gap or overlap between %v and %v", bands[i-1], bands[i])
+		}
+	}
+	if got := PlanBands(sample, 200, 300, 40_000); len(got) != 1 {
+		t.Errorf("a small area is one band: %v", got)
+	}
+}
+
+func TestBandWalk(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("reaches every car under the ceiling, without duplicates", func(t *testing.T) {
+		site := &bandSite{n: 2000, step: 20} // prices 0..39 980
+		c, err := New(site, WithReadPages(0)).Crawl(ctx, listing.Query{Geo: "newyork"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, l := range c.Listings {
+			if seen[l.Key()] {
+				t.Fatalf("duplicate %s", l.Key())
+			}
+			seen[l.Key()] = true
+		}
+		if len(c.Listings) != 2000 || c.Truncated {
+			t.Errorf("got %d of 2000, truncated=%v, %d requests", len(c.Listings), c.Truncated, len(site.urls))
+		}
+		if len(site.urls) > DefaultMaxFeedRequests || !strings.Contains(site.urls[1], "min_price=") {
+			t.Errorf("requests: %v", site.urls)
+		}
+	})
+
+	t.Run("the price ceiling comes from the query", func(t *testing.T) {
+		site := &bandSite{n: 2000, step: 20}
+		c, err := New(site, WithReadPages(0)).Crawl(ctx, listing.Query{Geo: "newyork", PriceTo: listing.Num(20000)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, u := range site.urls[1:] {
+			q, _ := url.Parse(u)
+			var hi int
+			fmt.Sscan(q.Query().Get("max_price"), &hi)
+			if hi > 20000 {
+				t.Errorf("band above the $20 000 ceiling: %s", u)
+			}
+		}
+		if !c.Truncated {
+			t.Error("cars above the ceiling were not read: still truncated")
+		}
+	})
+
+	t.Run("the request cap stops the walk", func(t *testing.T) {
+		site := &bandSite{n: 5000, step: 8}
+		c, err := New(site, WithReadPages(0), WithMaxFeedRequests(3)).Crawl(ctx, listing.Query{Geo: "newyork"})
+		if err != nil || len(site.urls) != 3 || !c.Truncated {
+			t.Errorf("err=%v requests=%d truncated=%v", err, len(site.urls), c.Truncated)
+		}
+	})
+
+	t.Run("an area under one page makes one request", func(t *testing.T) {
+		site := &bandSite{n: 100, step: 100}
+		if _, err := New(site, WithReadPages(0)).Crawl(ctx, listing.Query{Geo: "newyork"}); err != nil || len(site.urls) != 1 {
+			t.Errorf("err=%v requests=%d", err, len(site.urls))
+		}
+	})
 }

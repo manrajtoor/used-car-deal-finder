@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -122,6 +123,52 @@ func BuildURL(area, sellerType string) (string, error) {
 		return "", fmt.Errorf("unknown Craigslist seller type %q", sellerType)
 	}
 	return fmt.Sprintf("%s?batch=%d-0-%d-0-0&cc=%s&lang=en&searchPath=%s", API, a.ID, PageSize, a.Country, path), nil
+}
+
+// BandURL narrows a feed URL to asking prices lo..hi (whole dollars, both
+// inclusive, as the site's min_price/max_price are).
+func BandURL(url string, lo, hi int) string {
+	return fmt.Sprintf("%s&min_price=%d&max_price=%d", url, lo, hi)
+}
+
+// DefaultBandCeiling is the highest asking price the band walk covers when
+// the query sets none. Pricier cars still come in through the first,
+// unbanded page (the newest PageSize of everything).
+const DefaultBandCeiling = 40_000
+
+// DefaultMaxFeedRequests caps feed requests per crawl, bands included.
+const DefaultMaxFeedRequests = 24
+
+// Band is one price slice of the feed, both ends inclusive.
+type Band struct{ Lo, Hi int }
+
+// PlanBands splits 0..ceiling into bands expected to hold about target cars
+// each, with edges at quantiles of sample (the asking prices on the first,
+// unbanded page: the newest cars, a fair sample of the mix). total is the
+// area's full count, so a sample of 360 from 3 800 still plans ~13 bands.
+func PlanBands(sample []float64, total, target, ceiling int) []Band {
+	var prices []float64
+	for _, p := range sample {
+		if p > 0 && p <= float64(ceiling) {
+			prices = append(prices, p)
+		}
+	}
+	k := (total + target - 1) / target
+	if k < 2 || len(prices) < k {
+		return []Band{{0, ceiling}}
+	}
+	sort.Float64s(prices)
+	var bands []Band
+	lo := 0
+	for i := 1; i < k; i++ {
+		edge := int(prices[i*len(prices)/k]) / 100 * 100
+		if edge <= lo {
+			continue
+		}
+		bands = append(bands, Band{lo, edge - 1})
+		lo = edge
+	}
+	return append(bands, Band{lo, ceiling})
 }
 
 // Headers are what the feed checks, as a browser's call would carry.
@@ -600,6 +647,11 @@ type Source struct {
 	// not re-read and are sent without a description, which the Worker keeps.
 	// An error only costs the skip: every page is read as before. Nil: none.
 	ReadLookup func(ctx context.Context, ids []string) (map[string]bool, error)
+	// MaxFeedRequests caps feed requests per crawl. Above PageSize cars the
+	// feed only returns the newest PageSize, so the rest is reached by price
+	// band (PlanBands, a full band split in two). 1 keeps the single page.
+	// Default DefaultMaxFeedRequests.
+	MaxFeedRequests int
 	// Log receives progress lines. Nil: silent.
 	Log func(string)
 	// Now stamps pageReadAt. Nil: time.Now.
@@ -623,13 +675,16 @@ func WithReadLookup(f func(ctx context.Context, ids []string) (map[string]bool, 
 	return func(s *Source) { s.ReadLookup = f }
 }
 
+// WithMaxFeedRequests sets the feed-request cap per crawl (1: no bands).
+func WithMaxFeedRequests(n int) Option { return func(s *Source) { s.MaxFeedRequests = n } }
+
 // WithLog sets the progress logger.
 func WithLog(f func(string)) Option { return func(s *Source) { s.Log = f } }
 
 // New returns a Craigslist source that fetches through f. When f is a
 // HeaderFetcher, the feed call carries Headers(area).
 func New(f fetch.Fetcher, opts ...Option) *Source {
-	s := &Source{fetcher: f, ReadPages: DefaultReadPages}
+	s := &Source{fetcher: f, ReadPages: DefaultReadPages, MaxFeedRequests: DefaultMaxFeedRequests}
 	for _, o := range opts {
 		o(s)
 	}
@@ -679,22 +734,79 @@ func areaAndSeller(q listing.Query) (string, string) {
 // are only set on insert, so reading the page later would be too late. One
 // feed request covers a whole Québec area; a total above PageSize is reported
 // as Truncated.
-func (s *Source) Crawl(ctx context.Context, q listing.Query) (Crawl, error) {
-	area, seller := areaAndSeller(q)
-	url, err := BuildURL(area, seller)
-	if err != nil {
-		return Crawl{}, err
-	}
+func (s *Source) feed(ctx context.Context, area, url string) (SearchPage, error) {
 	var body string
+	var err error
 	if hf, ok := s.fetcher.(HeaderFetcher); ok {
 		body, err = hf.FetchWithHeaders(ctx, url, Headers(area))
 	} else {
 		body, err = s.fetcher.Fetch(ctx, url)
 	}
 	if err != nil {
+		return SearchPage{}, err
+	}
+	return ParseSearch(body, s.Match, area)
+}
+
+// bandWalk fetches the planned price bands after the first page and merges
+// what they add, splitting a band that came back full. It stops at the
+// request cap; complete reports whether every band fit under PageSize.
+func (s *Source) bandWalk(ctx context.Context, area, url string, first SearchPage, ceiling int) (SearchPage, int, bool, error) {
+	var sample []float64
+	for _, l := range first.Listings {
+		if l.Price != nil {
+			sample = append(sample, *l.Price)
+		}
+	}
+	queue := PlanBands(sample, int(*first.Total), PageSize*5/6, ceiling)
+	merged := first
+	seen := map[string]bool{}
+	for _, l := range first.Listings {
+		seen[l.Key()] = true
+	}
+	requests, complete := 1, true
+	for len(queue) > 0 {
+		if requests >= s.MaxFeedRequests {
+			complete = false
+			s.logf("  ! stopped at %d feed requests with %d price band(s) left", requests, len(queue))
+			break
+		}
+		b := queue[0]
+		queue = queue[1:]
+		page, err := s.feed(ctx, area, BandURL(url, b.Lo, b.Hi))
+		requests++
+		if err != nil {
+			return merged, requests, false, err
+		}
+		full := page.Total != nil && *page.Total > PageSize
+		if full && b.Hi-b.Lo >= 200 {
+			mid := (b.Lo + b.Hi) / 2 / 100 * 100
+			if mid > b.Lo && mid < b.Hi {
+				queue = append(queue, Band{b.Lo, mid - 1}, Band{mid, b.Hi})
+			}
+		} else if full {
+			complete = false // a $200 band still over PageSize: take what it gives
+		}
+		for i, l := range page.Listings {
+			if seen[l.Key()] {
+				continue
+			}
+			seen[l.Key()] = true
+			merged.Listings = append(merged.Listings, l)
+			merged.Extras = append(merged.Extras, page.Extras[i])
+		}
+		merged.OutOfArea += page.OutOfArea
+	}
+	return merged, requests, complete, nil
+}
+
+func (s *Source) Crawl(ctx context.Context, q listing.Query) (Crawl, error) {
+	area, seller := areaAndSeller(q)
+	url, err := BuildURL(area, seller)
+	if err != nil {
 		return Crawl{}, err
 	}
-	page, err := ParseSearch(body, s.Match, area)
+	page, err := s.feed(ctx, area, url)
 	if err != nil {
 		return Crawl{}, err
 	}
@@ -703,6 +815,19 @@ func (s *Source) Crawl(ctx context.Context, q listing.Query) (Crawl, error) {
 		total = jstext.Number(*page.Total)
 	}
 	s.logf("  %d of %s listings (+%d from nearby areas skipped)", len(page.Listings), total, page.OutOfArea)
+	feedRequests, bandsComplete := 1, false
+	if page.Total != nil && *page.Total > PageSize && s.MaxFeedRequests > 1 {
+		ceiling := DefaultBandCeiling
+		if q.PriceTo != nil && *q.PriceTo > 0 {
+			ceiling = int(*q.PriceTo)
+		}
+		first := len(page.Listings)
+		if page, feedRequests, bandsComplete, err = s.bandWalk(ctx, area, url, page, ceiling); err != nil {
+			return Crawl{}, err
+		}
+		s.logf("  price bands up to $%d: +%d listings in %d more request(s)%s", ceiling, len(page.Listings)-first, feedRequests-1,
+			map[bool]string{true: "", false: " (incomplete)"}[bandsComplete])
+	}
 
 	now := s.Now
 	if now == nil {
@@ -711,7 +836,7 @@ func (s *Source) Crawl(ctx context.Context, q listing.Query) (Crawl, error) {
 	readAt := now().UTC().Format("2006-01-02T15:04:05.000Z")
 
 	c := Crawl{Area: area, Extras: map[string]Extra{}, OutOfArea: page.OutOfArea}
-	c.URL, c.Total, c.Pages, c.PagesWalked = url, page.Total, listing.Num(1), 1
+	c.URL, c.Total, c.Pages, c.PagesWalked = url, page.Total, listing.Num(float64(feedRequests)), feedRequests
 	ready := make([]listing.Listing, 0, len(page.Listings))
 	var readBefore map[string]bool
 	if s.ReadLookup != nil && s.ReadPages > 0 {
@@ -776,7 +901,9 @@ func (s *Source) Crawl(ctx context.Context, q listing.Query) (Crawl, error) {
 	if page.Total != nil && float64(len(page.Listings)) < *page.Total {
 		c.Shortfall = int(*page.Total) - len(page.Listings)
 		c.ShortfallRatio = float64(c.Shortfall) / *page.Total
-		c.Truncated = *page.Total > PageSize
+		// A band walk that fit every band still leaves out cars above its
+		// price ceiling, so only an area that fits one page is complete.
+		c.Truncated = *page.Total > PageSize && !(bandsComplete && len(page.Listings) >= int(*page.Total))
 	}
 	c.Listings = applyLocalFilters(ready, q)
 	c.LocallyFiltered = q.YearFrom != nil || q.YearTo != nil
