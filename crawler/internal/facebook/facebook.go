@@ -121,10 +121,20 @@ var OntarioCities = []City{
 	{Key: "thunderBay", Token: "111551465530472", Label: "Thunder Bay", Province: "ON"},
 }
 
+// TristateCities: only "nyc" is a real Marketplace place among the obvious
+// words. longisland, newark, stamford, newhaven, edison and whiteplains all
+// answered 200 with one identical fallback page (checked 2026-09-30), the
+// silent failure described at City. The nyc feed itself reaches Long Island,
+// north and central New Jersey and Connecticut.
+var TristateCities = []City{
+	{Key: "nyc", Token: "nyc", Label: "New York", Province: "NY"},
+}
+
 // Cities resolves listing.Query.Geo to the cities to sweep:
 //
 //	""  or "quebec"   every Québec city (the JS default, CARBUYER_REGION unset)
 //	"ontario"         every Ontario city
+//	"tristate"        the New York tri-state area (NY, NJ, CT)
 //	a city key        that one city ("montreal", "toronto", "stCatharines")
 //
 // Keys match case-insensitively. An unknown name is an error, never a guess:
@@ -136,15 +146,17 @@ func Cities(geo string) ([]City, error) {
 		return QuebecCities, nil
 	case "ontario":
 		return OntarioCities, nil
+	case "tristate":
+		return TristateCities, nil
 	}
-	for _, list := range [][]City{QuebecCities, OntarioCities} {
+	for _, list := range [][]City{QuebecCities, OntarioCities, TristateCities} {
 		for _, c := range list {
 			if strings.ToLower(c.Key) == g {
 				return []City{c}, nil
 			}
 		}
 	}
-	return nil, fmt.Errorf("unknown Facebook geo %q: use quebec, ontario or a city key such as montreal or toronto", geo)
+	return nil, fmt.Errorf("unknown Facebook geo %q: use quebec, ontario, tristate or a city key such as montreal or nyc", geo)
 }
 
 // Vehicle is what a title matcher identifies.
@@ -275,14 +287,22 @@ var (
 	soldRe     = regexp.MustCompile(`"is_sold":true`)
 
 	compactKm = regexp.MustCompile(`(?i)(\d+(?:[.,]\d+)?)[` + jstext.SpaceClass + `]*k[` + jstext.SpaceClass + `]*km`)
-	nonDigit  = regexp.MustCompile(`[^\d]`)
+	// US listings: "78 k miles", "87,000 miles", "12K mi".
+	compactMiles = regexp.MustCompile(`(?i)(\d+(?:[.,]\d+)?)[` + jstext.SpaceClass + `]*k[` + jstext.SpaceClass + `]*mi(?:les?)?\b`)
+	milesWord    = regexp.MustCompile(`(?i)\bmi(?:les?)?\b`)
+	nonDigit     = regexp.MustCompile(`[^\d]`)
 
-	uriRe       = regexp.MustCompile(`"uri":"((?:[^"\\]|\\.)*)"`)
-	descRe      = regexp.MustCompile(`"redacted_description":\{"text":"((?:[^"\\]|\\.)*)"`)
-	odometerRe  = regexp.MustCompile(`"vehicle_odometer_data":\{"unit":"([A-Z]+)","value":(\d+)`)
-	subjectRe   = regexp.MustCompile(`"listing_price":\{[^{}]*"amount":"(\d+(?:\.\d+)?)"\},"__isMarketplaceVehicleListing"`)
-	anyTagRe    = regexp.MustCompile(`<[^>]+>`)
-	postalProv  = map[string]string{"QC": "QC", "ON": "ON", "NB": "NB", "NS": "NS"}
+	uriRe      = regexp.MustCompile(`"uri":"((?:[^"\\]|\\.)*)"`)
+	descRe     = regexp.MustCompile(`"redacted_description":\{"text":"((?:[^"\\]|\\.)*)"`)
+	odometerRe = regexp.MustCompile(`"vehicle_odometer_data":\{"unit":"([A-Z]+)","value":(\d+)`)
+	subjectRe  = regexp.MustCompile(`"listing_price":\{[^{}]*"amount":"(\d+(?:\.\d+)?)"\},"__isMarketplaceVehicleListing"`)
+	anyTagRe   = regexp.MustCompile(`<[^>]+>`)
+	// The state codes a record may carry. PA is read so that padding from
+	// Pennsylvania is recognised as out of region rather than kept as unknown.
+	postalProv = map[string]string{
+		"QC": "QC", "ON": "ON", "NB": "NB", "NS": "NS",
+		"NY": "NY", "NJ": "NJ", "CT": "CT", "PA": "PA",
+	}
 	defaultProv = "QC"
 )
 
@@ -337,10 +357,24 @@ func ParsePrice(formatted *string) *float64 {
 	return &n
 }
 
-// ParseMileage reads "183 k km" as 183000 and "87 000 km" as 87000.
+// ParseMileage reads "183 k km" as 183000 and "87 000 km" as 87000, and a US
+// "78 k miles" or "87,000 miles" as the same distance in km.
 func ParseMileage(subtitle *string) *float64 {
 	text := decode(subtitle)
 	if text == nil || *text == "" {
+		return nil
+	}
+	if m := compactMiles.FindStringSubmatch(*text); m != nil {
+		f, err := strconv.ParseFloat(strings.Replace(m[1], ",", ".", 1), 64)
+		if err == nil {
+			return listing.Num(jsRound(f * 1000 * kmPerMile))
+		}
+	}
+	if milesWord.MatchString(*text) {
+		digits := nonDigit.ReplaceAllString(*text, "")
+		if n, err := strconv.ParseFloat(digits, 64); err == nil && digits != "" {
+			return listing.Num(jsRound(n * kmPerMile))
+		}
 		return nil
 	}
 	if m := compactKm.FindStringSubmatch(*text); m != nil {
@@ -479,6 +513,16 @@ func ParseSearch(html string, o ParseOptions) (SearchPage, error) {
 	return SearchPage{Listings: listings}, nil
 }
 
+// kmPerMile converts a US odometer.
+const kmPerMile = 1.609344
+
+// tristate are the states of New York City's metro area. One Marketplace
+// place ("nyc") serves all three, and they price as one market, so a New
+// Jersey car in the nyc feed is in region, not padding.
+var tristate = map[string]bool{"NY": true, "NJ": true, "CT": true}
+
+func sameRegion(a, b string) bool { return a == b || (tristate[a] && tristate[b]) }
+
 // KeepInRegion drops results from another province, and refuses a page that
 // is entirely from one.
 //
@@ -489,7 +533,7 @@ func ParseSearch(html string, o ParseOptions) (SearchPage, error) {
 func KeepInRegion(items []Item, province, place string) ([]Item, int, error) {
 	kept := []Item{}
 	for _, it := range items {
-		if it.Province == nil || *it.Province == "" || *it.Province == province {
+		if it.Province == nil || *it.Province == "" || sameRegion(*it.Province, province) {
 			kept = append(kept, it)
 		}
 	}
@@ -592,7 +636,7 @@ func ParseItem(html string) (Detail, error) {
 		v, _ := strconv.ParseFloat(m[2], 64)
 		// Facebook reports the unit, so miles are not read as km.
 		if m[1] == "MILES" {
-			v = jsRound(v * 1.609344)
+			v = jsRound(v * kmPerMile)
 		}
 		km = &v
 	}

@@ -90,10 +90,19 @@ func (k *sourceKit) build(ctx context.Context, name string) (source.Source, erro
 			return craigslist.Vehicle{Make: m.Make, Model: m.Model, Year: m.Year}
 		})), nil
 	case "marketplace":
-		return facebook.New(k.fetcher(facebook.NewHTTPFetcher()), facebook.WithMatcher(func(title, desc string) facebook.Vehicle {
-			m := match(title, desc)
-			return facebook.Vehicle{Make: m.Make, Model: m.Model, Year: m.Year}
-		})), nil
+		// Newest first is the only sort, in $10 000 bands: a request budget
+		// (`pages`; the shipped searches.yml keeps it at 3) takes the plan in
+		// order, and with three sorts per $2 000 band three requests only saw
+		// cars under $2 000. Three bands of one sort cover $0-30 000 (the
+		// searches' maxPrice), each with its freshest cars, which is what a
+		// snipe alert needs.
+		return facebook.New(k.fetcher(facebook.NewHTTPFetcher()),
+			facebook.WithSorts("creation_time_descend"),
+			facebook.WithBands(40000, 10000),
+			facebook.WithMatcher(func(title, desc string) facebook.Vehicle {
+				m := match(title, desc)
+				return facebook.Vehicle{Make: m.Make, Model: m.Model, Year: m.Year}
+			})), nil
 	}
 	return nil, fmt.Errorf("--source %q: use one of %s", name, strings.Join(searches.Sources, ", "))
 }

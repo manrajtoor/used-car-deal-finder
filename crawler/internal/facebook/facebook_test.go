@@ -108,6 +108,11 @@ func TestParseMileage(t *testing.T) {
 		{listing.Str("87,5 k km"), f(87500)},
 		{listing.Str(`183\u00a0k\u00a0km`), f(183000)},
 		{listing.Str("87 000 km"), f(87000)},
+		{listing.Str(`78\u00a0k\u00a0miles`), f(125529)},
+		{listing.Str("12K mi"), f(19312)},
+		{listing.Str("87,000 miles"), f(140013)},
+		{listing.Str("1 mile"), f(2)},
+		{listing.Str("Milford"), nil},
 		{nil, nil},
 		{listing.Str("Montréal"), nil},
 	}
@@ -462,6 +467,8 @@ func TestCities(t *testing.T) {
 		{"toronto", "toronto"},
 		{"Montreal", "montreal"},
 		{"stcatharines", "stCatharines"},
+		{"tristate", "nyc"},
+		{"NYC", "nyc"},
 	}
 	for _, c := range cases {
 		got, err := Cities(c.geo)
@@ -533,6 +540,12 @@ func TestKeepInRegion(t *testing.T) {
 		{"unknown province kept", unknown, "montreal", 5, 0, ""},
 		{"thin page is not a fallback", inProvince("ON", 3, "x"), "montreal", 0, 3, ""},
 		{"empty page", nil, "montreal", 0, 0, ""},
+	}
+	// The nyc feed spans three states: New Jersey and Connecticut are in
+	// region there, Pennsylvania padding is not.
+	tri := append(append(append(inProvince("NY", 5, "x"), inProvince("NJ", 6, "Newark")...), inProvince("CT", 2, "Stamford")...), inProvince("PA", 3, "Easton")...)
+	if kept, dropped, err := KeepInRegion(tri, "NY", "nyc"); err != nil || len(kept) != 13 || dropped != 3 {
+		t.Errorf("tri-state: kept=%d dropped=%d err=%v, want 13 3 nil", len(kept), dropped, err)
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
