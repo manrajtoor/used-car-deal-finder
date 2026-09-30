@@ -9,6 +9,7 @@
 //! - [`snapshot`]  the daily deals snapshot (statements + read shape)
 //! - [`telegram`]  optional Telegram message per alert, via Composio (request + text)
 //! - [`vision`]    optional AI photo check per alert, via Baseten (request + reply)
+//! - [`dispatch`]  starting the GitHub Actions crawl from the Worker's cron (request shape)
 //! - [`auth`]      bearer-token check
 //! - [`service`]   use cases over the `ListingStore` / `ScoreStore` / `SnapshotStore` / `AlertStore` ports
 //! - `d1`          D1 implementation of the ports (wasm only)
@@ -20,6 +21,7 @@
 pub mod alerts;
 pub mod auth;
 pub mod deals;
+pub mod dispatch;
 pub mod ingest;
 pub mod scores;
 pub mod service;

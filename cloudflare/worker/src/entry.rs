@@ -18,6 +18,7 @@ use crate::alerts::{AlertRule, AlertsQuery, NoNotifier};
 use crate::auth::{bearer_ok, read_allowed};
 use crate::d1::D1Store;
 use crate::deals::DealsQuery;
+use crate::dispatch::{self, DispatchConfig};
 use crate::notify_http::{AnyNotifier, TelegramNotifier};
 use crate::service::{self, ApiError, SnapshotStore};
 use crate::telegram::ComposioConfig;
@@ -192,8 +193,43 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
 }
 
+/// The every-5-minutes cron: ask GitHub to start the crawl (`dispatch.rs`).
+async fn dispatch_crawl(env: &Env) {
+    let get = |k: &str| env.secret(k).ok().map(|v| v.to_string()).or_else(|| env.var(k).ok().map(|v| v.to_string()));
+    let Some(cfg) = DispatchConfig::from_vars(get) else {
+        console_log!("crawl dispatch: off (GITHUB_DISPATCH_TOKEN, GITHUB_REPO or GITHUB_WORKFLOW not set)");
+        return;
+    };
+    let result = async {
+        let headers = Headers::new();
+        for (k, v) in cfg.headers() {
+            headers.set(k, &v)?;
+        }
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_headers(headers)
+            .with_body(Some(worker::wasm_bindgen::JsValue::from_str(&cfg.body().to_string())));
+        let mut res = Fetch::Request(Request::new_with_init(&cfg.url(), &init)?).send().await?;
+        let status = res.status_code();
+        let text = res.text().await.unwrap_or_default();
+        Ok::<_, worker::Error>((status, text))
+    }
+    .await;
+    match result {
+        Ok((status, text)) => match dispatch::started(status, &text) {
+            Ok(()) => console_log!("crawl dispatch: started {} on {}", cfg.workflow, cfg.repo),
+            Err(e) => console_error!("crawl dispatch: {e}"),
+        },
+        Err(e) => console_error!("crawl dispatch: {e}"),
+    }
+}
+
 #[event(scheduled)]
 async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    if event.cron() == dispatch::DISPATCH_CRON {
+        dispatch_crawl(&env).await;
+        return;
+    }
     let db = match store(&env) {
         Ok(db) => db,
         Err(e) => {

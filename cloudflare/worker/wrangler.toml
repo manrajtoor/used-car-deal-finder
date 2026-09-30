@@ -30,10 +30,17 @@ migrations_dir = "../d1/migrations"
 
 # Daily re-score: stores the best deals in deal_snapshots / deal_snapshot_items.
 # 11:00 UTC = 07:00 in Toronto (06:00 in winter). Cron times are always UTC.
+# Every 5 minutes: start the GitHub Actions crawl (src/dispatch.rs); GitHub's
+# own `schedule:` is best effort and often skips a 5-minute slot.
 [triggers]
-crons = ["0 11 * * *"]
+crons = ["0 11 * * *", "*/5 * * * *"]
 
 [vars]
+# The crawl this Worker starts every 5 minutes (src/dispatch.rs). The token is
+# a secret: npx wrangler secret put GITHUB_DISPATCH_TOKEN (fine-grained, this
+# repository only, Actions: read and write). Without it the cron only logs.
+GITHUB_REPO = "manrajtoor/used-car-deal-finder"
+GITHUB_WORKFLOW = "crawl.yml"
 # Scorer minComps used by the cron job and by /api/deals when the request has
 # no ?minComps=. Empty = the scorer default (8 comparable cars per bucket).
 DEFAULT_MIN_COMPS = ""
