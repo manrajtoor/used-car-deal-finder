@@ -4,8 +4,8 @@
 //! - New id: insert the row, and a price_history row when it has a price.
 //! - Known id: overwrite the mutable columns, bump `price_changes` and add a
 //!   price_history row when the price changed, clear `removed_at` (relisted).
-//! - `is_sold` / `sold_at` can be turned on but never off; `page_read_at` is
-//!   never blanked.
+//! - `is_sold` / `sold_at` can be turned on but never off; `page_read_at` and
+//!   `description` are never blanked.
 
 use std::collections::HashMap;
 
@@ -40,7 +40,10 @@ pub const MUTABLE: [&str; 25] = [
 ];
 
 const STICKY: [&str; 2] = ["is_sold", "sold_at"];
-const KEEP_IF_ABSENT: [&str; 1] = ["page_read_at"];
+/// Kept when a push leaves them out. A description comes only from reading
+/// the ad page; the crawler skips pages it has read before (see
+/// `described_queries`), so a feed-only push must not blank the stored one.
+const KEEP_IF_ABSENT: [&str; 2] = ["page_read_at", "description"];
 
 /// Most listings one request may carry. The Go client sends far fewer.
 pub const MAX_LISTINGS_PER_REQUEST: usize = 1000;
@@ -384,6 +387,42 @@ pub fn existing_queries(ids: &[String]) -> Vec<Stmt> {
         .collect()
 }
 
+/// Most ids one "which are described" request may ask about.
+pub const MAX_DESCRIBED_IDS: usize = 1000;
+
+/// `{"ids": [...]}` from POST /api/listings/described.
+pub fn parse_described(body: &Value) -> Result<Vec<String>, String> {
+    let ids: Vec<String> = body
+        .get("ids")
+        .and_then(Value::as_array)
+        .ok_or("body needs an \"ids\" array")?
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if ids.len() > MAX_DESCRIBED_IDS {
+        return Err(format!("too many ids in one request ({} > {MAX_DESCRIBED_IDS})", ids.len()));
+    }
+    Ok(ids)
+}
+
+/// Which of `ids` have a stored description (their ad page was read), so the
+/// crawler can spend its page budget on ads it has not read yet.
+pub fn described_queries(ids: &[String]) -> Vec<Stmt> {
+    ids.chunks(90)
+        .map(|chunk| {
+            Stmt::new(
+                format!(
+                    "SELECT id FROM listings WHERE description IS NOT NULL AND id IN ({})",
+                    placeholders(1, chunk.len())
+                ),
+                chunk.iter().map(|id| Param::Text(id.clone())).collect(),
+            )
+        })
+        .collect()
+}
+
 /// Reads one row of an `existing_queries` result.
 pub fn existing_from_row(row: &Value) -> Option<(String, Existing)> {
     let id = row.get("id")?.as_str()?.to_string();
@@ -563,5 +602,24 @@ mod tests {
         // Already has one: the same ad read again is not news.
         let mut p = Planner::new(HashMap::from([("a".into(), known("2026-09-30T11:00:00.000Z", false, true))]));
         assert!(p.plan(&json!({"id": "a", "price": 100, "description": "Runs great"}), &scope).is_empty());
+    }
+
+    #[test]
+    fn described_request_and_queries() {
+        assert_eq!(parse_described(&json!({"ids": ["a", "", 3, "b"]})).unwrap(), vec!["a", "b"]);
+        assert!(parse_described(&json!({"nope": 1})).is_err());
+        let many: Vec<String> = (0..1001).map(|i| i.to_string()).collect();
+        assert!(parse_described(&json!({ "ids": many })).is_err());
+        let ids: Vec<String> = (0..100).map(|i| format!("craigslist:{i}")).collect();
+        let qs = described_queries(&ids);
+        assert_eq!((qs.len(), qs[0].params.len(), qs[1].params.len()), (2, 90, 10));
+        assert!(qs[0].sql.starts_with("SELECT id FROM listings WHERE description IS NOT NULL AND id IN (?1, "));
+    }
+
+    #[test]
+    fn a_push_without_a_description_keeps_the_stored_one() {
+        let sql = update_sql();
+        assert!(sql.contains("description = COALESCE(?"), "{sql}");
+        assert!(sql.contains("page_read_at = COALESCE(?"), "{sql}");
     }
 }

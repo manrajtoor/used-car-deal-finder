@@ -4,6 +4,7 @@
 //! Routes:
 //!   GET  /api/health             liveness
 //!   POST /api/listings           ingest (Authorization: Bearer <INGEST_TOKEN>)
+//!   POST /api/listings/described {"ids": [...]} -> which have a description (same bearer)
 //!   GET  /api/deals              ?make=&model=&seller=dealer|private&limit=&minComps=
 //!   GET  /api/snapshots/latest   what the last cron run stored
 //!   GET  /api/alerts             ?limit=  newest snipe alerts (new_deal_alerts)
@@ -120,6 +121,23 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     match (method, path.as_str()) {
         (Method::Get, "/api/health") => json_response(200, &json!({ "ok": true, "time": now_iso() })),
 
+        (Method::Post, "/api/listings/described") => {
+            let token = env.secret("INGEST_TOKEN").map(|s| s.to_string()).unwrap_or_default();
+            if token.is_empty() || !bearer_ok(req.headers().get("Authorization")?.as_deref(), &token) {
+                let r = error_response(&ApiError { status: 401, message: "missing or wrong bearer token".into() })?;
+                r.headers().set("WWW-Authenticate", "Bearer")?;
+                return Ok(r);
+            }
+            let body: Value = match req.json().await {
+                Ok(v) => v,
+                Err(e) => return error_response(&ApiError::bad_request(format!("body is not valid JSON: {e}"))),
+            };
+            match service::described(&store(&env)?, &body).await {
+                Ok(v) => json_response(200, &v),
+                Err(e) => error_response(&e),
+            }
+        }
+
         (Method::Post, "/api/listings") => {
             let token = env.secret("INGEST_TOKEN").map(|s| s.to_string()).unwrap_or_default();
             if token.is_empty() {
@@ -186,7 +204,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             }
         }
 
-        (_, "/api/health" | "/api/listings" | "/api/deals" | "/api/snapshots/latest" | "/api/alerts") => {
+        (_, "/api/health" | "/api/listings" | "/api/listings/described" | "/api/deals" | "/api/snapshots/latest" | "/api/alerts") => {
             error_response(&ApiError { status: 405, message: "method not allowed".into() })
         }
         _ => error_response(&ApiError { status: 404, message: "not found".into() }),

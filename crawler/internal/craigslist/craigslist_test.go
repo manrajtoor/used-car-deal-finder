@@ -466,6 +466,43 @@ func TestCrawl(t *testing.T) {
 		}
 	})
 
+	t.Run("pages read in an earlier run are skipped, and the budget goes to the rest", func(t *testing.T) {
+		f := &fakeFetcher{feed: feed([][]any{item(itemOpts{id: 1}), item(itemOpts{id: 2}), item(itemOpts{id: 3})}, 3)}
+		var asked []string
+		lookup := func(_ context.Context, ids []string) (map[string]bool, error) {
+			asked = ids
+			return map[string]bool{"craigslist:7000000001": true, "craigslist:7000000002": true}, nil
+		}
+		c, err := New(f, WithReadPages(1), WithReadLookup(lookup)).Crawl(ctx, listing.Query{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(asked) != 3 || len(c.Listings) != 3 || c.PagesSkipped != 2 || c.PagesRead != 1 {
+			t.Fatalf("asked=%v listings=%d skipped=%d read=%d", asked, len(c.Listings), c.PagesSkipped, c.PagesRead)
+		}
+		if len(f.calls) != 2 || !strings.Contains(f.calls[1], "tok3") {
+			t.Errorf("the one page read should be the unread third ad: %v", f.calls)
+		}
+		for _, l := range c.Listings[:2] {
+			if l.Description != nil {
+				t.Errorf("%s: a skipped ad is sent without a description (the Worker keeps its own)", l.Key())
+			}
+		}
+	})
+
+	t.Run("a failed read lookup reads pages as before", func(t *testing.T) {
+		f := &fakeFetcher{feed: feed([][]any{item(itemOpts{id: 1})}, 1)}
+		lookup := func(context.Context, []string) (map[string]bool, error) { return nil, errors.New("worker down") }
+		var logs []string
+		c, err := New(f, WithReadLookup(lookup), WithLog(func(s string) { logs = append(logs, s) })).Crawl(ctx, listing.Query{})
+		if err != nil || c.PagesRead != 1 || c.PagesSkipped != 0 {
+			t.Fatalf("err=%v read=%d skipped=%d", err, c.PagesRead, c.PagesSkipped)
+		}
+		if !strings.Contains(strings.Join(logs, "\n"), "read lookup failed") {
+			t.Errorf("logs = %v", logs)
+		}
+	})
+
 	t.Run("the read budget caps post pages", func(t *testing.T) {
 		f := &fakeFetcher{feed: feed([][]any{item(itemOpts{id: 1}), item(itemOpts{id: 2}), item(itemOpts{id: 3})}, 3)}
 		c, err := New(f, WithReadPages(1)).Crawl(ctx, listing.Query{})

@@ -3,6 +3,7 @@ package apistore
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -168,5 +169,60 @@ func TestNewValidates(t *testing.T) {
 		if c.ok && cl.Endpoint != c.endpoint {
 			t.Errorf("New(%q).Endpoint = %q, want %q", c.url, cl.Endpoint, c.endpoint)
 		}
+	}
+}
+
+func TestDescribedAsksTheWorkerInChunks(t *testing.T) {
+	var calls []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/listings/described" || r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer tok" {
+			http.Error(w, "wrong request", http.StatusBadRequest)
+			return
+		}
+		var body struct{ IDs []string }
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		calls = append(calls, len(body.IDs))
+		// Everything ending in 7 has a description.
+		var got []string
+		for _, id := range body.IDs {
+			if strings.HasSuffix(id, "7") {
+				got = append(got, id)
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"described": got})
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 1500)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("craigslist:%d", i)
+	}
+	got, err := c.Described(context.Background(), ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 || calls[0] != MaxDescribedIDs || calls[1] != 500 {
+		t.Errorf("calls = %v, want [1000 500]", calls)
+	}
+	if len(got) != 150 || !got["craigslist:7"] || got["craigslist:8"] {
+		t.Errorf("got %d ids", len(got))
+	}
+}
+
+func TestDescribedErrorNeverLeaksTheToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL, "s3cret-token")
+	_, err := c.Described(context.Background(), []string{"a"})
+	if err == nil || strings.Contains(err.Error(), "s3cret-token") || !strings.Contains(err.Error(), "500") {
+		t.Errorf("err = %v", err)
 	}
 }

@@ -43,6 +43,8 @@ pub trait ListingStore {
     async fn known(&self, ids: &[String]) -> Result<HashMap<String, Existing>, String>;
     /// Runs the planned writes atomically.
     async fn apply(&self, stmts: Vec<Stmt>) -> Result<(), String>;
+    /// Those of `ids` that have a stored description.
+    async fn described(&self, ids: &[String]) -> Result<Vec<String>, String>;
     /// Active listings of these make/model groups, in the crawler's camelCase
     /// shape, and the ids among them that already have a stored score.
     async fn in_groups(&self, groups: &[Group]) -> Result<(Vec<Value>, BTreeSet<String>), String>;
@@ -93,6 +95,16 @@ async fn ingest_planned(store: &impl ListingStore, body: &Value, now: &str) -> R
         store.apply(stmts).await.map_err(ApiError::internal)?;
     }
     Ok((planner, payload.listings))
+}
+
+/// POST /api/listings/described: which of the ids already have a description.
+pub async fn described(store: &impl ListingStore, body: &Value) -> Result<Value, ApiError> {
+    let ids = crate::ingest::parse_described(body).map_err(ApiError::bad_request)?;
+    if ids.is_empty() {
+        return Ok(json!({ "described": [] }));
+    }
+    let found = store.described(&ids).await.map_err(ApiError::internal)?;
+    Ok(json!({ "described": found }))
 }
 
 /// What POST /api/listings answers: the save stats (the Go client reads
@@ -269,6 +281,15 @@ mod tests {
         async fn apply(&self, stmts: Vec<Stmt>) -> Result<(), String> {
             self.applied.borrow_mut().extend(stmts);
             Ok(())
+        }
+        async fn described(&self, ids: &[String]) -> Result<Vec<String>, String> {
+            Ok(self
+                .rows
+                .iter()
+                .filter(|l| l["description"].is_string())
+                .filter_map(|l| l["id"].as_str().map(str::to_string))
+                .filter(|id| ids.contains(id))
+                .collect())
         }
         async fn in_groups(&self, groups: &[Group]) -> Result<(Vec<Value>, BTreeSet<String>), String> {
             *self.active_calls.borrow_mut() += 1;
@@ -501,6 +522,16 @@ mod tests {
         async fn latest_snapshot(&self) -> Result<Option<Value>, String> {
             Ok(None)
         }
+    }
+
+    #[test]
+    fn described_answers_only_ids_with_a_description() {
+        let rows = vec![json!({"id": "a", "description": "clean"}), json!({"id": "b", "description": null}), json!({"id": "c"})];
+        let fake = Fake { rows, ..Default::default() };
+        let v = block_on(described(&fake, &json!({"ids": ["a", "b", "c", "zz"]}))).unwrap();
+        assert_eq!(v, json!({"described": ["a"]}));
+        assert_eq!(block_on(described(&fake, &json!({"ids": []}))).unwrap(), json!({"described": []}));
+        assert_eq!(block_on(described(&fake, &json!(3))).unwrap_err().status, 400);
     }
 
     #[test]

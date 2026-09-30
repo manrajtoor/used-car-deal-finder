@@ -27,6 +27,9 @@ type sourceKit struct {
 	offline fetch.Fetcher
 	db      *sqlitestore.DB
 	vocab   *lespac.Vocabulary
+	// described asks the Worker which listings' ad pages were read before
+	// (--push only); the local SQLite file of a scheduled run is always new.
+	described func(ctx context.Context, ids []string) (map[string]bool, error)
 }
 
 func (k *sourceKit) fetcher(client *fetch.HTTPFetcher) fetch.Fetcher {
@@ -85,10 +88,14 @@ func (k *sourceKit) build(ctx context.Context, name string) (source.Source, erro
 		}
 		// The feed is one request; each post page read is another. 20 per run
 		// keeps a scheduled crawl small (the JS watcher reads up to 100).
-		return craigslist.New(f, craigslist.WithReadPages(20), craigslist.WithMatcher(func(title string) craigslist.Vehicle {
+		opts := []craigslist.Option{craigslist.WithReadPages(20), craigslist.WithMatcher(func(title string) craigslist.Vehicle {
 			m := match(title, "")
 			return craigslist.Vehicle{Make: m.Make, Model: m.Model, Year: m.Year}
-		})), nil
+		})}
+		if k.described != nil {
+			opts = append(opts, craigslist.WithReadLookup(k.described))
+		}
+		return craigslist.New(f, opts...), nil
 	case "marketplace":
 		// Newest first is the only sort, in $10 000 bands: a request budget
 		// (`pages`; the shipped searches.yml keeps it at 3) takes the plan in

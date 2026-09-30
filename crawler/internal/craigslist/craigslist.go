@@ -595,6 +595,11 @@ type Source struct {
 	// description it gave; such a listing is not re-read and keeps that
 	// description, which a feed-only write would otherwise blank. Nil: none.
 	Stored func(id string) (description *string, read bool)
+	// ReadLookup reports, in one call per crawl, which of the feed's ids were
+	// read in an earlier run and are stored elsewhere (the Worker). Those are
+	// not re-read and are sent without a description, which the Worker keeps.
+	// An error only costs the skip: every page is read as before. Nil: none.
+	ReadLookup func(ctx context.Context, ids []string) (map[string]bool, error)
 	// Log receives progress lines. Nil: silent.
 	Log func(string)
 	// Now stamps pageReadAt. Nil: time.Now.
@@ -612,6 +617,11 @@ func WithReadPages(n int) Option { return func(s *Source) { s.ReadPages = n } }
 
 // WithStored sets the lookup for listings already read.
 func WithStored(f func(id string) (*string, bool)) Option { return func(s *Source) { s.Stored = f } }
+
+// WithReadLookup sets the batch lookup for listings read in an earlier run.
+func WithReadLookup(f func(ctx context.Context, ids []string) (map[string]bool, error)) Option {
+	return func(s *Source) { s.ReadLookup = f }
+}
 
 // WithLog sets the progress logger.
 func WithLog(f func(string)) Option { return func(s *Source) { s.Log = f } }
@@ -645,6 +655,8 @@ type Crawl struct {
 	OutOfArea   int
 	PagesRead   int
 	PagesFailed int
+	// PagesSkipped: read in an earlier run (ReadLookup), not opened again.
+	PagesSkipped int
 }
 
 func areaAndSeller(q listing.Query) (string, string) {
@@ -701,8 +713,27 @@ func (s *Source) Crawl(ctx context.Context, q listing.Query) (Crawl, error) {
 	c := Crawl{Area: area, Extras: map[string]Extra{}, OutOfArea: page.OutOfArea}
 	c.URL, c.Total, c.Pages, c.PagesWalked = url, page.Total, listing.Num(1), 1
 	ready := make([]listing.Listing, 0, len(page.Listings))
+	var readBefore map[string]bool
+	if s.ReadLookup != nil && s.ReadPages > 0 {
+		ids := make([]string, 0, len(page.Listings))
+		for _, l := range page.Listings {
+			ids = append(ids, l.Key())
+		}
+		var err error
+		if readBefore, err = s.ReadLookup(ctx, ids); err != nil {
+			s.logf("  ! read lookup failed, reading pages as usual: %s", err)
+			readBefore = nil
+		} else {
+			s.logf("  %d of %d ad pages already read in an earlier run", len(readBefore), len(ids))
+		}
+	}
 	for i, l := range page.Listings {
 		x := page.Extras[i]
+		if readBefore[l.Key()] {
+			ready, c.Extras[l.Key()] = append(ready, l), x
+			c.PagesSkipped++
+			continue
+		}
 		if s.Stored != nil {
 			if desc, read := s.Stored(l.Key()); read {
 				l.Description = desc

@@ -9,7 +9,7 @@ use worker::{D1Database, D1PreparedStatement};
 
 use crate::alerts;
 use crate::deals::{listing_from_row, DealsQuery};
-use crate::ingest::{existing_from_row, existing_queries, Existing};
+use crate::ingest::{described_queries, existing_from_row, existing_queries, Existing};
 use crate::scores::{self, Group};
 use crate::service::{AlertStore, ListingStore, ScoreStore, SnapshotStore};
 use crate::snapshot::{assemble, ITEMS_SQL, LATEST_HEADER_SQL};
@@ -77,6 +77,14 @@ impl ListingStore for D1Store {
 
     async fn apply(&self, stmts: Vec<Stmt>) -> Result<(), String> {
         self.batch(stmts).await
+    }
+
+    async fn described(&self, ids: &[String]) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        for q in described_queries(ids) {
+            out.extend(self.rows(&q).await?.iter().filter_map(|r| r.get("id")?.as_str().map(str::to_string)));
+        }
+        Ok(out)
     }
 
     async fn in_groups(&self, groups: &[Group]) -> Result<(Vec<Value>, BTreeSet<String>), String> {

@@ -128,6 +128,67 @@ func (c *Client) Save(ctx context.Context, listings []listing.Listing, scope sto
 	return toSaveStats(total), nil
 }
 
+// DescribedPath answers which listing ids already have a stored description.
+const DescribedPath = IngestPath + "/described"
+
+// Described asks the Worker which of ids already have a description, that is
+// whose ad page was read in an earlier run, so a crawl can skip re-reading
+// them. The scheduled crawl starts from an empty SQLite file every time, so
+// only the Worker knows. Asked in chunks of MaxDescribedIDs.
+func (c *Client) Described(ctx context.Context, ids []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for start := 0; start < len(ids); start += MaxDescribedIDs {
+		end := min(start+MaxDescribedIDs, len(ids))
+		payload, err := json.Marshal(map[string][]string{"ids": ids[start:end]})
+		if err != nil {
+			return nil, err
+		}
+		var resp struct {
+			Described []string `json:"described"`
+		}
+		if err := c.call(ctx, c.Endpoint+"/described", payload, &resp); err != nil {
+			return nil, err
+		}
+		for _, id := range resp.Described {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+
+// MaxDescribedIDs is the Worker's limit per described request.
+const MaxDescribedIDs = 1000
+
+// call POSTs payload to url with the bearer token and decodes a 200 answer into out.
+func (c *Client) call(ctx context.Context, url string, payload []byte, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("User-Agent", "carbuyer-crawler")
+	client := c.HTTP
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		msg := strings.TrimSpace(string(raw))
+		if len(msg) > 300 {
+			msg = msg[:300] + "..."
+		}
+		return fmt.Errorf("%s: HTTP %d: %s", url, resp.StatusCode, msg)
+	}
+	return json.Unmarshal(raw, out)
+}
+
 func (c *Client) post(ctx context.Context, body wireBody) (Stats, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {

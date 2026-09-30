@@ -345,6 +345,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
+		kit.described = pusher.Described
 	}
 	db, err := sqlitestore.Open(o.db)
 	if err != nil {
