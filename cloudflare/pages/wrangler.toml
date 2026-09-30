@@ -14,3 +14,11 @@ compatibility_date = "2026-09-01"
 [[services]]
 binding = "API"
 service = "carbuyer-api"
+
+# Cloudflare Access app in front of this site (Zero Trust > Access > Applications).
+# /api/* verifies the Access login token against these, so a per-deployment
+# <hash>.pages.dev address that Access does not cover still serves no data.
+# The audience tag is on the app's Overview page ("Application Audience (AUD) Tag").
+[vars]
+ACCESS_TEAM_DOMAIN = "https://divine-lab-4dde.cloudflareaccess.com"
+ACCESS_AUD = "5962811774529e05da39c8087f17f07151f6ba50d66899dce2fa3d07d26de085"
