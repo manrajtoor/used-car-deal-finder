@@ -65,14 +65,68 @@ pub struct SaveStats {
     pub price_rises: usize,
     /// Listings refused because they had no string id.
     pub skipped: usize,
+    /// Known, unchanged and seen within TOUCH_EVERY_HOURS: nothing written.
+    pub unchanged: usize,
 }
 
 /// The stored state of a known listing that the upsert rules need.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Existing {
     pub price: Option<f64>,
     pub price_changes: i64,
     pub removed: bool,
+    /// When the store last saw it (ISO time, the crawler's `seenAt`).
+    pub last_seen: Option<String>,
+    /// A description is stored: its ad page has been read.
+    pub has_description: bool,
+}
+
+/// How often an unchanged listing's `last_seen` is refreshed. Rewriting every
+/// seen car on every push cost ~2 400 D1 row writes per crawl, over the Free
+/// plan's 100 000 a day at one crawl every few minutes; `last_seen` only
+/// feeds the 14-day expiry, so once a day is plenty.
+pub const TOUCH_EVERY_HOURS: i64 = 24;
+
+/// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
+/// days_from_civil), and back: enough date arithmetic for ISO timestamps
+/// without a date library.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// `iso` (YYYY-MM-DDTHH:MM:SS[.sss]Z) minus `hours`, in the same
+/// millisecond ISO form the crawler writes, so the two compare as strings.
+/// `None` when `iso` is not in that form.
+pub fn iso_minus_hours(iso: &str, hours: i64) -> Option<String> {
+    let b = iso.as_bytes();
+    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let n = |r: std::ops::Range<usize>| iso.get(r)?.parse::<i64>().ok();
+    let (y, mo, d, h, mi, sec) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
+    let ms = if b[19] == b'.' { iso.get(20..23).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0) } else { 0 };
+    let total = (days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + sec - hours * 3600) * 1000 + ms;
+    let (secs, ms) = (total.div_euclid(1000), total.rem_euclid(1000));
+    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (y, mo, d) = civil_from_days(days);
+    Some(format!("{y:04}-{mo:02}-{d:02}T{:02}:{:02}:{:02}.{ms:03}Z", rest / 3600, rest % 3600 / 60, rest % 60))
 }
 
 /// A parsed request body.
@@ -260,11 +314,24 @@ impl Planner {
             }
             self.stats.added += 1;
             self.mark_fresh(&id);
-            self.known.insert(id, Existing { price: new_price, price_changes: 0, removed: false });
+            let has_description = !matches!(row["description"], Param::Null);
+            self.known.insert(id, Existing { price: new_price, last_seen: Some(scope.seen_at.clone()), has_description, ..Default::default() });
             return out;
         };
 
         let changed = new_price.is_some_and(|p| existing.price != Some(p));
+        // Nothing new to store: same price, not coming back, no newly read
+        // ad page (a description the store lacks), and last_seen recent
+        // enough for the expiry. No write.
+        let brings_page = !existing.has_description && !matches!(row["description"], Param::Null);
+        let recent = match (&existing.last_seen, iso_minus_hours(&scope.seen_at, TOUCH_EVERY_HOURS)) {
+            (Some(seen), Some(cutoff)) => *seen >= cutoff,
+            _ => false,
+        };
+        if !changed && !existing.removed && !brings_page && recent {
+            self.stats.unchanged += 1;
+            return Vec::new();
+        }
         let next = existing.price_changes + i64::from(changed);
         let mut params = values(&row, &MUTABLE);
         params.push(Param::Text(scope.seen_at.clone()));
@@ -286,7 +353,11 @@ impl Planner {
                 self.stats.price_rises += 1;
             }
         }
-        self.known.insert(id, Existing { price: new_price, price_changes: next, removed: false });
+        let has_description = existing.has_description || !matches!(row["description"], Param::Null);
+        self.known.insert(
+            id,
+            Existing { price: new_price, price_changes: next, last_seen: Some(scope.seen_at.clone()), has_description, removed: false },
+        );
         out
     }
 
@@ -304,7 +375,7 @@ pub fn existing_queries(ids: &[String]) -> Vec<Stmt> {
         .map(|chunk| {
             Stmt::new(
                 format!(
-                    "SELECT id, price, price_changes, removed_at FROM listings WHERE id IN ({})",
+                    "SELECT id, price, price_changes, removed_at, last_seen, description IS NOT NULL AS has_description FROM listings WHERE id IN ({})",
                     placeholders(1, chunk.len())
                 ),
                 chunk.iter().map(|id| Param::Text(id.clone())).collect(),
@@ -322,6 +393,8 @@ pub fn existing_from_row(row: &Value) -> Option<(String, Existing)> {
             price: row.get("price").and_then(Value::as_f64),
             price_changes: row.get("price_changes").and_then(Value::as_f64).unwrap_or(0.0) as i64,
             removed: row.get("removed_at").is_some_and(|v| !v.is_null()),
+            last_seen: row.get("last_seen").and_then(Value::as_str).map(str::to_string),
+            has_description: row.get("has_description").and_then(Value::as_f64) == Some(1.0),
         },
     ))
 }
@@ -398,15 +471,15 @@ mod tests {
         assert!(p.plan(&json!({"price": 1}), &scope("T3")).is_empty());
         assert_eq!(
             p.stats,
-            SaveStats { seen: 3, added: 1, relisted: 0, price_drops: 1, price_rises: 0, skipped: 1 }
+            SaveStats { seen: 3, added: 1, relisted: 0, price_drops: 1, price_rises: 0, skipped: 1, unchanged: 0 }
         );
     }
 
     #[test]
     fn known_rows_count_relists_and_rises() {
         let known = HashMap::from([
-            ("r".to_string(), Existing { price: Some(10000.0), price_changes: 2, removed: true }),
-            ("n".to_string(), Existing { price: None, price_changes: 0, removed: false }),
+            ("r".to_string(), Existing { price: Some(10000.0), price_changes: 2, removed: true, ..Default::default() }),
+            ("n".to_string(), Existing { price: None, price_changes: 0, removed: false, ..Default::default() }),
         ]);
         let mut p = Planner::new(known);
         let s = p.plan(&json!({"id": "r", "price": 11000}), &scope("T"));
@@ -419,10 +492,10 @@ mod tests {
     #[test]
     fn fresh_ids_are_new_relisted_or_cheaper() {
         let known = HashMap::from([
-            ("same".to_string(), Existing { price: Some(100.0), price_changes: 0, removed: false }),
-            ("rise".to_string(), Existing { price: Some(100.0), price_changes: 0, removed: false }),
-            ("drop".to_string(), Existing { price: Some(100.0), price_changes: 0, removed: false }),
-            ("back".to_string(), Existing { price: Some(100.0), price_changes: 0, removed: true }),
+            ("same".to_string(), Existing { price: Some(100.0), price_changes: 0, removed: false, ..Default::default() }),
+            ("rise".to_string(), Existing { price: Some(100.0), price_changes: 0, removed: false, ..Default::default() }),
+            ("drop".to_string(), Existing { price: Some(100.0), price_changes: 0, removed: false, ..Default::default() }),
+            ("back".to_string(), Existing { price: Some(100.0), price_changes: 0, removed: true, ..Default::default() }),
         ]);
         let mut p = Planner::new(known);
         for l in [
@@ -447,6 +520,48 @@ mod tests {
         assert!(qs[2].sql.ends_with("IN (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)"));
         let (id, e) = existing_from_row(&json!({"id": "x", "price": 5.0, "price_changes": 1.0, "removed_at": "T"})).unwrap();
         assert_eq!(id, "x");
-        assert_eq!(e, Existing { price: Some(5.0), price_changes: 1, removed: true });
+        assert_eq!(e, Existing { price: Some(5.0), price_changes: 1, removed: true, ..Default::default() });
+    }
+
+    #[test]
+    fn iso_minus_hours_crosses_days_months_and_leap_years() {
+        assert_eq!(iso_minus_hours("2026-09-30T12:00:00.000Z", 24).as_deref(), Some("2026-09-29T12:00:00.000Z"));
+        assert_eq!(iso_minus_hours("2026-03-01T05:30:00.250Z", 24).as_deref(), Some("2026-02-28T05:30:00.250Z"));
+        assert_eq!(iso_minus_hours("2028-03-01T00:00:00Z", 24).as_deref(), Some("2028-02-29T00:00:00.000Z"));
+        assert_eq!(iso_minus_hours("2027-01-01T01:00:00.000Z", 2).as_deref(), Some("2026-12-31T23:00:00.000Z"));
+        assert!(iso_minus_hours("yesterday", 24).is_none());
+    }
+
+    #[test]
+    fn an_unchanged_recent_listing_is_not_rewritten() {
+        let scope = Scope { seen_at: "2026-09-30T12:00:00.000Z".into(), ..Default::default() };
+        let known = |last_seen: &str, removed: bool, has_description: bool| Existing {
+            price: Some(100.0),
+            removed,
+            last_seen: Some(last_seen.into()),
+            has_description,
+            ..Default::default()
+        };
+        let l = json!({"id": "a", "price": 100});
+        let mut p = Planner::new(HashMap::from([("a".into(), known("2026-09-30T02:00:00.000Z", false, false))]));
+        assert!(p.plan(&l, &scope).is_empty(), "seen 10 h ago at the same price: nothing to write");
+        assert_eq!((p.stats.seen, p.stats.unchanged), (1, 1));
+        assert!(p.fresh.is_empty());
+
+        let cases = [
+            ("seen over a day ago: last_seen refreshed", known("2026-09-29T11:00:00.000Z", false, false), json!({"id": "a", "price": 100})),
+            ("price changed", known("2026-09-30T11:00:00.000Z", false, false), json!({"id": "a", "price": 90})),
+            ("back after a removal", known("2026-09-30T11:00:00.000Z", true, false), json!({"id": "a", "price": 100})),
+            ("its ad page was just read", known("2026-09-30T11:00:00.000Z", false, false),
+             json!({"id": "a", "price": 100, "description": "Runs great"})),
+        ];
+        for (name, e, l) in cases {
+            let mut p = Planner::new(HashMap::from([("a".into(), e)]));
+            assert!(!p.plan(&l, &scope).is_empty(), "{name}");
+            assert_eq!(p.stats.unchanged, 0, "{name}");
+        }
+        // Already has one: the same ad read again is not news.
+        let mut p = Planner::new(HashMap::from([("a".into(), known("2026-09-30T11:00:00.000Z", false, true))]));
+        assert!(p.plan(&json!({"id": "a", "price": 100, "description": "Runs great"}), &scope).is_empty());
     }
 }

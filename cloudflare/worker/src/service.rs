@@ -387,7 +387,7 @@ mod tests {
     }
 
     fn known(id: &str, price: f64, removed: bool) -> HashMap<String, Existing> {
-        HashMap::from([(id.to_string(), Existing { price: Some(price), price_changes: 0, removed })])
+        HashMap::from([(id.to_string(), Existing { price: Some(price), price_changes: 0, removed, ..Default::default() })])
     }
 
     #[test]
@@ -506,13 +506,13 @@ mod tests {
     #[test]
     fn ingest_plans_against_known_rows() {
         let fake = Fake {
-            known: HashMap::from([("old".to_string(), Existing { price: Some(100.0), price_changes: 0, removed: true })]),
+            known: HashMap::from([("old".to_string(), Existing { price: Some(100.0), price_changes: 0, removed: true, ..Default::default() })]),
             ..Default::default()
         };
         let body = json!({"listings": [{"id": "new", "price": 5}, {"id": "old", "price": 90}, {"nope": 1}],
                           "scope": {"seenAt": "T"}});
         let stats = block_on(ingest(&fake, &body, "NOW")).unwrap();
-        assert_eq!(stats, SaveStats { seen: 2, added: 1, relisted: 1, price_drops: 1, price_rises: 0, skipped: 1 });
+        assert_eq!(stats, SaveStats { seen: 2, added: 1, relisted: 1, price_drops: 1, price_rises: 0, skipped: 1, unchanged: 0 });
         let applied = fake.applied.borrow();
         assert_eq!(applied.len(), 4, "insert+history, update+history");
         assert!(applied[2].sql.starts_with("UPDATE"));
