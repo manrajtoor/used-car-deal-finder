@@ -16,6 +16,7 @@ import (
 	"carbuyer/crawler/internal/searches"
 	"carbuyer/crawler/internal/source"
 	"carbuyer/crawler/internal/store/sqlitestore"
+	"carbuyer/crawler/internal/vocab"
 )
 
 // sourceKit builds the concrete sources. All of them share one Throttle, so
@@ -36,7 +37,9 @@ func (k *sourceKit) fetcher(client *fetch.HTTPFetcher) fetch.Fetcher {
 }
 
 // vocabulary is read once per run: the makes and models already stored by
-// the structured sources, which title-only sources match against.
+// the structured sources, which title-only sources match against, then the
+// built-in US list (vocab.US) for a run with no structured source at all.
+// Stored spellings come first, so they win where both name the same model.
 func (k *sourceKit) vocabulary(ctx context.Context) (lespac.Vocabulary, error) {
 	if k.vocab != nil {
 		return *k.vocab, nil
@@ -48,6 +51,11 @@ func (k *sourceKit) vocabulary(ctx context.Context) (lespac.Vocabulary, error) {
 	v := lespac.Vocabulary{Makes: makes}
 	for _, m := range models {
 		v.Models = append(v.Models, lespac.Model{Make: m.Make, Model: m.Model, As: m.Model})
+	}
+	usMakes, usModels := vocab.US()
+	v.Makes = append(v.Makes, usMakes...)
+	for _, m := range usModels {
+		v.Models = append(v.Models, lespac.Model{Make: m.Make, Model: m.Model, As: m.As})
 	}
 	k.vocab = &v
 	return v, nil
