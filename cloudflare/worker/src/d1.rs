@@ -1,16 +1,17 @@
 //! Cloudflare D1 implementation of the storage ports. The only module that
 //! knows about D1; everything it runs was planned elsewhere as `Stmt`s.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde_json::Value;
 use worker::wasm_bindgen::JsValue;
 use worker::{D1Database, D1PreparedStatement};
 
 use crate::alerts;
-use crate::deals::{listing_from_row, LOAD_SQL};
+use crate::deals::{listing_from_row, DealsQuery};
 use crate::ingest::{existing_from_row, existing_queries, Existing};
-use crate::service::{AlertStore, ListingStore, SnapshotStore};
+use crate::scores::{self, Group};
+use crate::service::{AlertStore, ListingStore, ScoreStore, SnapshotStore};
 use crate::snapshot::{assemble, ITEMS_SQL, LATEST_HEADER_SQL};
 use crate::sql::{Param, Stmt};
 
@@ -78,8 +79,35 @@ impl ListingStore for D1Store {
         self.batch(stmts).await
     }
 
-    async fn active(&self) -> Result<Vec<Value>, String> {
-        Ok(self.rows(&Stmt::new(LOAD_SQL, vec![])).await?.iter().map(listing_from_row).collect())
+    async fn in_groups(&self, groups: &[Group]) -> Result<(Vec<Value>, BTreeSet<String>), String> {
+        let mut out = Vec::new();
+        let mut has_score = BTreeSet::new();
+        for q in scores::group_queries(groups) {
+            for row in self.rows(&q).await? {
+                if row.get("has_score").and_then(Value::as_f64) == Some(1.0) {
+                    if let Some(id) = row.get("id").and_then(Value::as_str) {
+                        has_score.insert(id.to_string());
+                    }
+                }
+                out.push(listing_from_row(&row));
+            }
+        }
+        Ok((out, has_score))
+    }
+}
+
+impl ScoreStore for D1Store {
+    async fn save_scores(&self, stmts: Vec<Stmt>) -> Result<(), String> {
+        if stmts.is_empty() {
+            return Ok(());
+        }
+        self.batch(stmts).await
+    }
+
+    async fn stored_deals(&self, q: &DealsQuery, min_comps: f64) -> Result<Value, String> {
+        let counts = self.rows(&scores::counts_query(q, min_comps)).await?.into_iter().next().unwrap_or(Value::Null);
+        let rows = self.rows(&scores::deals_query(q, min_comps)).await?;
+        Ok(scores::assemble(&counts, &rows))
     }
 }
 

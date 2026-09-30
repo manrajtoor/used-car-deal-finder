@@ -26,8 +26,10 @@ import (
 // IngestPath is the Worker route that accepts listings.
 const IngestPath = "/api/listings"
 
-// DefaultBatchSize keeps each request (and the D1 batch it becomes) small.
-const DefaultBatchSize = 50
+// DefaultBatchSize keeps each request (and the D1 batch it becomes) small:
+// the Worker has ~10 ms of CPU per request on the Free plan, and parsing and
+// planning a batch costs CPU before any scoring (50 measured at 9-19 ms).
+const DefaultBatchSize = 25
 
 // Stats is what the Worker reports, summed over every request.
 type Stats struct {

@@ -115,6 +115,8 @@ pub fn score_against(models: &[&dyn Baseline], listing: &Listing, discount: Opti
 pub struct AppraiserOptions {
     pub model: Value,
     pub discount: Value,
+    /// Sites whose dealer listings make the dealer baseline.
+    pub dealer_sources: Vec<String>,
     pub private_sources: Vec<String>,
 }
 
@@ -123,7 +125,13 @@ impl Default for AppraiserOptions {
         AppraiserOptions {
             model: Value::Object(Map::new()),
             discount: Value::Object(Map::new()),
-            private_sources: ["autohebdo", "kijiji", "lespac", "marketplace"].iter().map(|s| s.to_string()).collect(),
+            // Craigslist is the only source a US crawl has so far, so its
+            // dealers make the baseline there; in Canada AutoHebdo still does.
+            dealer_sources: ["autohebdo", "craigslist"].iter().map(|s| s.to_string()).collect(),
+            private_sources: ["autohebdo", "kijiji", "lespac", "marketplace", "craigslist"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 }
@@ -136,6 +144,9 @@ impl AppraiserOptions {
         }
         if let Some(d) = v.get("discount").filter(|d| d.is_object()) {
             o.discount = d.clone();
+        }
+        if let Some(s) = v.get("dealerSources").and_then(Value::as_array) {
+            o.dealer_sources = s.iter().filter_map(Value::as_str).map(str::to_string).collect();
         }
         if let Some(s) = v.get("privateSources").and_then(Value::as_array) {
             o.private_sources = s.iter().filter_map(Value::as_str).map(str::to_string).collect();
@@ -156,7 +167,7 @@ impl Appraiser {
     pub fn build(listings: &[Listing], options: &AppraiserOptions) -> Appraiser {
         let dealer_rows: Vec<Listing> = listings
             .iter()
-            .filter(|l| l.is_seller("Dealer") && l.source.as_deref() == Some("autohebdo"))
+            .filter(|l| l.is_seller("Dealer") && l.source.as_ref().is_some_and(|s| options.dealer_sources.contains(s)))
             .cloned()
             .collect();
         let dealer = PriceModel::build(&dealer_rows, ModelConfig::default().with_overrides(&options.model));
@@ -288,6 +299,31 @@ mod tests {
         let over = score_listing(&model(), &car(40_000.0), None).unwrap();
         assert!(over.discount_pct < 0.0);
         assert!(!over.below_p25);
+    }
+
+    #[test]
+    fn craigslist_dealers_make_a_baseline_and_its_private_sellers_are_scored() {
+        let mut rows: Vec<Value> = (0..12)
+            .map(|i| {
+                json!({"id": format!("d{i}"), "source": "craigslist", "make": "Honda", "model": "Civic",
+                       "year": 2018, "km": 90000 + i * 2000, "price": 15000 + (i % 3) * 300,
+                       "province": "NY", "sellerType": "Dealer"})
+            })
+            .collect();
+        for i in 0..8 {
+            rows.push(json!({"id": format!("p{i}"), "source": "craigslist", "make": "Honda", "model": "Civic",
+                             "year": 2018, "km": 95000, "price": 13000 + (i % 3) * 200,
+                             "province": "NY", "sellerType": "PrivateSeller"}));
+        }
+        let out = run(&json!({"listings": rows})).unwrap();
+        let scored = |prefix: &str| {
+            out["scores"].as_array().unwrap().iter()
+                .filter(|s| s["id"].as_str().unwrap().starts_with(prefix) && !s["score"].is_null())
+                .count()
+        };
+        assert_eq!(scored("d"), 12, "dealers price against the Craigslist dealer baseline");
+        assert!(scored("p") > 0, "private sellers price through the Craigslist discount");
+        assert!(out["appraiser"]["sources"].as_array().unwrap().contains(&json!("craigslist")));
     }
 
     #[test]

@@ -1,18 +1,24 @@
-//! Use cases (ingest + alerts, deals, snapshot, alert list) written against
-//! small storage ports and a notifier port. `d1.rs` implements the ports on
-//! Cloudflare D1; the tests below use an in-memory fake. The HTTP and cron
-//! handlers in `entry.rs` only translate requests into these calls.
+//! Use cases (ingest + scores + alerts, deals, snapshot, alert list) written
+//! against small storage ports and a notifier port. `d1.rs` implements the
+//! ports on Cloudflare D1; the tests below use an in-memory fake. The HTTP and
+//! cron handlers in `entry.rs` only translate requests into these calls.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::alerts::{self, Alert, AlertRule, AlertsQuery, Notifier};
-use crate::deals::{best_deals, DealsQuery};
+use crate::deals::DealsQuery;
 use crate::ingest::{listing_id, parse_payload, Existing, Planner, SaveStats};
+use crate::scores::{self, Group};
 use crate::snapshot;
 use crate::sql::Stmt;
+
+/// The scorer's default `minComps`: `/api/deals` shows scores backed by at
+/// least this many comparable cars unless the request or DEFAULT_MIN_COMPS
+/// says otherwise.
+pub const DEFAULT_DEALS_MIN_COMPS: f64 = 8.0;
 
 /// An error with the HTTP status it should map to.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,8 +43,18 @@ pub trait ListingStore {
     async fn known(&self, ids: &[String]) -> Result<HashMap<String, Existing>, String>;
     /// Runs the planned writes atomically.
     async fn apply(&self, stmts: Vec<Stmt>) -> Result<(), String>;
-    /// Active listings in insertion order, in the crawler's camelCase shape.
-    async fn active(&self) -> Result<Vec<Value>, String>;
+    /// Active listings of these make/model groups, in the crawler's camelCase
+    /// shape, and the ids among them that already have a stored score.
+    async fn in_groups(&self, groups: &[Group]) -> Result<(Vec<Value>, BTreeSet<String>), String>;
+}
+
+/// Where stored scores live (`listing_scores`).
+#[allow(async_fn_in_trait)]
+pub trait ScoreStore {
+    /// Runs score writes (and the expiry sweep) atomically.
+    async fn save_scores(&self, stmts: Vec<Stmt>) -> Result<(), String>;
+    /// `{comps, scored, matched, appraiser, deals}` for `q`, from stored scores.
+    async fn stored_deals(&self, q: &DealsQuery, min_comps: f64) -> Result<Value, String>;
 }
 
 /// Where deal snapshots live.
@@ -59,13 +75,13 @@ pub trait AlertStore {
     async fn recent_alerts(&self, limit: usize) -> Result<Vec<Value>, String>;
 }
 
-/// POST /api/listings (without alerts).
+/// POST /api/listings (without scores or alerts).
 pub async fn ingest(store: &impl ListingStore, body: &Value, now: &str) -> Result<SaveStats, ApiError> {
-    Ok(ingest_planned(store, body, now).await?.stats)
+    Ok(ingest_planned(store, body, now).await?.0.stats)
 }
 
-/// Runs the upsert and returns the planner (stats + fresh ids).
-async fn ingest_planned(store: &impl ListingStore, body: &Value, now: &str) -> Result<Planner, ApiError> {
+/// Runs the upsert and returns the planner (stats + fresh ids) and the batch.
+async fn ingest_planned(store: &impl ListingStore, body: &Value, now: &str) -> Result<(Planner, Vec<Value>), ApiError> {
     let payload = parse_payload(body, now).map_err(ApiError::bad_request)?;
     let mut ids: Vec<String> = payload.listings.iter().filter_map(listing_id).map(str::to_string).collect();
     ids.sort();
@@ -76,54 +92,79 @@ async fn ingest_planned(store: &impl ListingStore, body: &Value, now: &str) -> R
     if !stmts.is_empty() {
         store.apply(stmts).await.map_err(ApiError::internal)?;
     }
-    Ok(planner)
+    Ok((planner, payload.listings))
 }
 
 /// What POST /api/listings answers: the save stats (the Go client reads
-/// those) plus the alerts this batch raised.
+/// those) plus how many cars were rescored and the alerts this batch raised.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestOutcome {
     #[serde(flatten)]
     pub stats: SaveStats,
+    pub rescored: usize,
     pub new_alerts: usize,
-    /// Set when alerting failed. The listings are stored either way.
+    /// Set when scoring or alerting failed. The listings are stored either way.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alert_error: Option<String>,
 }
 
-/// POST /api/listings with snipe alerts: store the batch, then alert on the
-/// fresh listings (new, relisted or cheaper) that score as strong deals.
-/// Alerting never fails the ingest: the listings are already committed.
-pub async fn ingest_and_alert<S: ListingStore + AlertStore>(
+/// POST /api/listings: store the batch, rescore the make/model groups of its
+/// fresh listings (new, relisted or cheaper), store those scores, and alert
+/// on the fresh ones that score as strong deals. Scoring and alerting never
+/// fail the ingest: the listings are already committed.
+pub async fn ingest_and_alert<S: ListingStore + ScoreStore + AlertStore>(
     store: &S,
     notifier: &impl Notifier,
     rule: &AlertRule,
     body: &Value,
     now: &str,
 ) -> Result<IngestOutcome, ApiError> {
-    let planner = ingest_planned(store, body, now).await?;
-    let mut out = IngestOutcome { stats: planner.stats, new_alerts: 0, alert_error: None };
-    match raise_alerts(store, notifier, rule, &planner.fresh, now).await {
-        Ok(n) => out.new_alerts = n,
-        Err(e) => out.alert_error = Some(e),
+    let (planner, batch) = ingest_planned(store, body, now).await?;
+    let mut out = IngestOutcome { stats: planner.stats.clone(), rescored: 0, new_alerts: 0, alert_error: None };
+    match rescore(store, rule, &batch, &planner.fresh, now).await {
+        Ok(scored) => {
+            out.rescored = scored.len();
+            match raise_alerts(store, notifier, rule, &scored, &planner.fresh, now).await {
+                Ok(n) => out.new_alerts = n,
+                Err(e) => out.alert_error = Some(e),
+            }
+        }
+        Err(e) => out.alert_error = Some(format!("rescoring failed: {e}")),
     }
     Ok(out)
 }
 
+/// Scores and stores the groups of the fresh listings; nothing fresh, no scoring.
+async fn rescore<S: ListingStore + ScoreStore>(
+    store: &S,
+    rule: &AlertRule,
+    batch: &[Value],
+    fresh: &[String],
+    now: &str,
+) -> Result<Vec<scores::Scored>, String> {
+    let groups = scores::fresh_groups(batch, fresh);
+    if groups.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (rows, has_score) = store.in_groups(&groups).await?;
+    // Scored with the alert rule's minComps, so every car an alert could
+    // fire on is priced; /api/deals filters on the stored comp count.
+    let scored = scores::score(&rows, rule.min_comps)?;
+    store.save_scores(scores::upsert_statements(&scored, fresh, &has_score, now)).await?;
+    Ok(scored)
+}
+
 /// Returns how many new alerts were stored.
-async fn raise_alerts<S: ListingStore + AlertStore>(
+async fn raise_alerts<S: AlertStore>(
     store: &S,
     notifier: &impl Notifier,
     rule: &AlertRule,
+    scored: &[scores::Scored],
     fresh: &[String],
     now: &str,
 ) -> Result<usize, String> {
-    if !rule.enabled || fresh.is_empty() {
-        return Ok(0); // nothing new: no scoring at all
-    }
-    let active = store.active().await?;
-    let found = alerts::find(&active, fresh, rule)?;
+    let found = alerts::find(scored, fresh, rule);
     if found.is_empty() {
         return Ok(0);
     }
@@ -154,21 +195,24 @@ pub async fn recent_alerts(
     Ok(json!({ "generatedAt": now, "rule": rule.to_json(), "alerts": list }))
 }
 
-/// GET /api/deals.
-pub async fn deals(store: &impl ListingStore, q: &DealsQuery, now: &str) -> Result<Value, ApiError> {
-    let listings = store.active().await.map_err(ApiError::internal)?;
-    let mut out = best_deals(&listings, q).map_err(ApiError::internal)?;
+/// GET /api/deals, from stored scores.
+pub async fn deals(store: &impl ScoreStore, q: &DealsQuery, now: &str) -> Result<Value, ApiError> {
+    let min_comps = q.min_comps.unwrap_or(DEFAULT_DEALS_MIN_COMPS);
+    let mut out = store.stored_deals(q, min_comps).await.map_err(ApiError::internal)?;
     out["generatedAt"] = Value::from(now);
     Ok(out)
 }
 
-/// The cron job: re-score everything and store the best deals.
-pub async fn take_snapshot<S: ListingStore + SnapshotStore>(
+/// The cron job: expire cars not seen since `cutoff`, then store the best
+/// stored deals as the day's snapshot.
+pub async fn take_snapshot<S: ScoreStore + SnapshotStore>(
     store: &S,
     min_comps: Option<f64>,
     now: &str,
+    cutoff: &str,
     cron: Option<&str>,
 ) -> Result<Value, ApiError> {
+    store.save_scores(scores::expire_statements(now, cutoff)).await.map_err(ApiError::internal)?;
     let q = DealsQuery { limit: snapshot::SNAPSHOT_DEALS, min_comps, ..Default::default() };
     let out = deals(store, &q, now).await?;
     store
@@ -181,6 +225,7 @@ pub async fn take_snapshot<S: ListingStore + SnapshotStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alerts::NoNotifier;
     use std::cell::RefCell;
     use std::future::Future;
     use std::pin::pin;
@@ -207,6 +252,11 @@ mod tests {
         /// Alert table: (listing id, price, deal JSON, notified).
         alert_rows: RefCell<Vec<(String, i64, String, bool)>>,
         active_calls: RefCell<usize>,
+        /// Groups asked for by each in_groups call.
+        group_calls: RefCell<Vec<Vec<Group>>>,
+        /// listing_scores: id -> (discount, comps, deal JSON).
+        score_rows: RefCell<HashMap<String, (f64, f64, Value)>>,
+        expiries: RefCell<usize>,
     }
 
     impl ListingStore for Fake {
@@ -220,9 +270,47 @@ mod tests {
             self.applied.borrow_mut().extend(stmts);
             Ok(())
         }
-        async fn active(&self) -> Result<Vec<Value>, String> {
+        async fn in_groups(&self, groups: &[Group]) -> Result<(Vec<Value>, BTreeSet<String>), String> {
             *self.active_calls.borrow_mut() += 1;
-            Ok(self.rows.clone())
+            self.group_calls.borrow_mut().push(groups.to_vec());
+            let key = |l: &Value| (l["make"].as_str().unwrap_or("").to_string(), l["model"].as_str().unwrap_or("").to_string());
+            let rows: Vec<Value> = self.rows.iter().filter(|l| groups.contains(&key(l))).cloned().collect();
+            let has = self.score_rows.borrow().keys().cloned().collect();
+            Ok((rows, has))
+        }
+    }
+
+    /// Interprets the score statements the way SQLite would.
+    impl ScoreStore for Fake {
+        async fn save_scores(&self, stmts: Vec<Stmt>) -> Result<(), String> {
+            let mut rows = self.score_rows.borrow_mut();
+            for st in stmts {
+                if st.sql.starts_with("INSERT OR REPLACE INTO listing_scores") {
+                    let deal: Value = serde_json::from_str(st.params[7].as_str().unwrap()).unwrap();
+                    rows.insert(st.params[0].as_str().unwrap().into(), (st.params[4].as_f64().unwrap(), st.params[5].as_f64().unwrap_or(0.0), deal));
+                } else if st.sql.starts_with("DELETE FROM listing_scores WHERE listing_id = ?1") {
+                    rows.remove(st.params[0].as_str().unwrap());
+                } else if st.sql.starts_with("UPDATE listings SET removed_at") {
+                    *self.expiries.borrow_mut() += 1;
+                }
+            }
+            Ok(())
+        }
+        async fn stored_deals(&self, q: &DealsQuery, min_comps: f64) -> Result<Value, String> {
+            let rows = self.score_rows.borrow();
+            let key = |v: &Value, k: &str| scores::name_key(v[k].as_str().unwrap_or(""));
+            let mut hits: Vec<&(f64, f64, Value)> = rows
+                .values()
+                .filter(|r| r.1 >= min_comps)
+                .filter(|r| q.make.as_ref().is_none_or(|m| key(&r.2, "make") == scores::name_key(m)))
+                .filter(|r| q.model.as_ref().is_none_or(|m| key(&r.2, "model") == scores::name_key(m)))
+                .filter(|r| q.seller_type.as_ref().is_none_or(|t| r.2["sellerType"].as_str() == Some(t)))
+                .collect();
+            hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            let matched = hits.len();
+            let deals: Vec<Value> = hits.iter().take(q.limit).map(|r| r.2.clone()).collect();
+            let scored = rows.values().filter(|r| r.1 >= min_comps).count();
+            Ok(json!({"comps": self.rows.len(), "scored": scored, "matched": matched, "appraiser": null, "deals": deals}))
         }
     }
 
@@ -374,7 +462,7 @@ mod tests {
         let off = AlertRule { enabled: false, ..Default::default() };
         let r = block_on(ingest_and_alert(&fake, &out, &off, &json!([cheap]), "T")).unwrap();
         assert_eq!(r.new_alerts, 0);
-        assert_eq!(*fake.active_calls.borrow(), 0);
+        assert_eq!(r.rescored, 11, "alerts off still keeps the dashboard's scores current");
         assert!(out.sent.borrow().is_empty());
     }
 
@@ -442,13 +530,47 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_scores_and_stores() {
-        let rows: Vec<Value> = (0..10)
-            .map(|i| json!({"id": format!("x{i}"), "source": "autohebdo", "make": "Toyota", "model": "RAV4",
-                            "year": 2019, "km": 60000, "price": 20000 + i * 300, "sellerType": "Dealer", "province": "QC", "isDamaged": false}))
-            .collect();
+    fn a_batch_loads_and_rescores_only_its_own_groups() {
+        let mut rows = stored_market(&car("cheap", 20000));
+        rows.push(json!({"id": "civic", "source": "autohebdo", "make": "Honda", "model": "Civic", "year": 2018,
+                         "km": 50000, "price": 15000, "sellerType": "Dealer", "province": "QC", "isDamaged": false}));
         let fake = Fake { rows, ..Default::default() };
-        let out = block_on(take_snapshot(&fake, Some(3.0), "T", Some("0 11 * * *"))).unwrap();
+        let r = block_on(ingest_and_alert(&fake, &NoNotifier, &AlertRule::default(), &json!([car("cheap", 20000)]), "T")).unwrap();
+        assert_eq!(*fake.group_calls.borrow(), vec![vec![("Toyota".to_string(), "RAV4".to_string())]]);
+        assert_eq!(r.rescored, 11, "the ten stored RAV4s and the new one, not the Civic");
+        assert_eq!(fake.score_rows.borrow().len(), 11);
+        assert!(!fake.score_rows.borrow().contains_key("civic"));
+    }
+
+    #[test]
+    fn deals_read_stored_scores_filtered_and_ranked() {
+        let fake = Fake { rows: stored_market(&car("cheap", 20000)), ..Default::default() };
+        block_on(ingest_and_alert(&fake, &NoNotifier, &AlertRule::default(), &json!([car("cheap", 20000)]), "T")).unwrap();
+        let calls = *fake.active_calls.borrow();
+
+        let q = DealsQuery { min_comps: Some(6.0), ..Default::default() };
+        let v = block_on(deals(&fake, &q, "NOW")).unwrap();
+        assert_eq!(*fake.active_calls.borrow(), calls, "reading deals never loads or scores listings");
+        assert_eq!(v["generatedAt"], "NOW");
+        let list = v["deals"].as_array().unwrap();
+        assert_eq!(list[0]["id"], "cheap", "biggest discount first");
+        assert!(list[0]["score"]["discountPct"].as_f64().unwrap() >= 15.0);
+        assert_eq!(v["matched"], v["scored"]);
+
+        let honda = DealsQuery { make: Some("honda".into()), min_comps: Some(6.0), ..Default::default() };
+        assert_eq!(block_on(deals(&fake, &honda, "NOW")).unwrap()["matched"], 0);
+        let strict = DealsQuery { min_comps: Some(50.0), ..Default::default() };
+        assert_eq!(block_on(deals(&fake, &strict, "NOW")).unwrap()["scored"], 0, "too few comps behind every score");
+    }
+
+    #[test]
+    fn snapshot_expires_then_stores_the_stored_deals() {
+        let fake = Fake { rows: stored_market(&car("cheap", 20000)), ..Default::default() };
+        block_on(ingest_and_alert(&fake, &NoNotifier, &AlertRule::default(), &json!([car("cheap", 20000)]), "T")).unwrap();
+        let calls = *fake.active_calls.borrow();
+        let out = block_on(take_snapshot(&fake, Some(6.0), "T", "CUT", Some("0 11 * * *"))).unwrap();
+        assert_eq!(*fake.expiries.borrow(), 1);
+        assert_eq!(*fake.active_calls.borrow(), calls, "the cron does not rescore");
         assert_eq!(out["generatedAt"], "T");
         assert!(out["scored"].as_u64().unwrap() > 0);
         let saved = fake.snapshots.borrow();

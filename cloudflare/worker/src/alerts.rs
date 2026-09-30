@@ -1,6 +1,6 @@
 //! Snipe alerts. When an ingest brings a listing that is new to the store,
 //! back after a removal, or cheaper than before, it is scored against every
-//! active listing; if it passes the [`AlertRule`] it is stored once in
+//! active listing of its make and model (`scores.rs`); if it passes the [`AlertRule`] it is stored once in
 //! `new_deal_alerts` (keyed by listing id + price) and handed to a
 //! [`Notifier`].
 //!
@@ -11,6 +11,7 @@ use std::collections::HashSet;
 
 use serde_json::{json, Map, Value};
 
+use crate::scores::Scored;
 use crate::sql::{json_num, placeholders, Param, Stmt};
 
 /// Defaults of the Worker vars below.
@@ -127,32 +128,24 @@ impl Alert {
     }
 }
 
-/// Scores `active` (every active stored listing, the baseline) and returns an
-/// alert for each `fresh` id that passes `rule`, best discount first.
-pub fn find(active: &[Value], fresh: &[String], rule: &AlertRule) -> Result<Vec<Alert>, String> {
+/// An alert for each `fresh` id among `scored` (whole make/model groups,
+/// scored by `scores::score`) that passes `rule`, best discount first.
+pub fn find(scored: &[Scored], fresh: &[String], rule: &AlertRule) -> Vec<Alert> {
     if !rule.enabled || fresh.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let wanted: HashSet<&str> = fresh.iter().map(String::as_str).collect();
-    let input =
-        json!({ "listings": active, "options": { "model": { "minComps": rule.min_comps } } });
-    let out = scorer::score::run(&input)?;
-    let scores = out
-        .get("scores")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-
     let mut alerts = Vec::new();
     let mut seen = HashSet::new();
-    for (l, s) in active.iter().zip(scores.iter()) {
+    for s in scored {
+        let l = &s.listing;
         let Some(id) = l.get("id").and_then(Value::as_str) else {
             continue;
         };
         if !wanted.contains(id) || !seen.insert(id) {
             continue;
         }
-        let Some(score) = s.get("score").filter(|v| v.is_object()) else {
+        let Some(score) = &s.score else {
             continue;
         };
         if !rule.accepts(l, score) {
@@ -179,7 +172,7 @@ pub fn find(active: &[Value], fresh: &[String], rule: &AlertRule) -> Result<Vec<
             .partial_cmp(&a.discount_pct)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    Ok(alerts)
+    alerts
 }
 
 /// Which (listing, price) keys are already alerted, chunked under D1's
@@ -448,7 +441,8 @@ mod tests {
     fn find_alerts_only_fresh_strong_deals() {
         let m = market();
         let rule = AlertRule::default();
-        let got = find(&m, &["cheap".into(), "d1".into(), "missing".into()], &rule).unwrap();
+        let scored = crate::scores::score(&m, rule.min_comps).unwrap();
+        let got = find(&scored, &["cheap".into(), "d1".into(), "missing".into()], &rule);
         assert_eq!(got.len(), 1, "{got:?}");
         let a = &got[0];
         assert_eq!(a.key(), ("cheap".to_string(), 20000));
@@ -472,20 +466,20 @@ mod tests {
         assert_eq!(s["score"], a.deal["score"]);
 
         assert!(
-            find(&m, &["d1".into()], &rule).unwrap().is_empty(),
+            find(&scored, &["d1".into()], &rule).is_empty(),
             "a normal price is no alert"
         );
-        assert!(find(&m, &[], &rule).unwrap().is_empty());
+        assert!(find(&scored, &[], &rule).is_empty());
         let strict = AlertRule {
             min_discount_pct: 50.0,
             ..rule
         };
-        assert!(find(&m, &["cheap".into()], &strict).unwrap().is_empty());
+        assert!(find(&scored, &["cheap".into()], &strict).is_empty());
     }
 
     #[test]
     fn statements_and_rows() {
-        let alerts = find(&market(), &["cheap".into()], &AlertRule::default()).unwrap();
+        let alerts = find(&crate::scores::score(&market(), 6.0).unwrap(), &["cheap".into()], &AlertRule::default());
         let ins = insert_statements(&alerts, "T");
         assert_eq!(ins.len(), 1);
         assert!(ins[0]
@@ -546,7 +540,7 @@ mod tests {
 
     #[test]
     fn summary_is_one_line_per_alert() {
-        let alerts = find(&market(), &["cheap".into()], &AlertRule::default()).unwrap();
+        let alerts = find(&crate::scores::score(&market(), 6.0).unwrap(), &["cheap".into()], &AlertRule::default());
         let s = summary(&alerts);
         assert_eq!(s.lines().count(), 1);
         assert!(s.contains("2019 Toyota RAV4 LE: 20000 $"), "{s}");

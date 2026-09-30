@@ -4,12 +4,13 @@
 //! - [`sql`]       database-neutral statements (`Stmt`, `Param`)
 //! - [`alerts`]    snipe alerts: the rule, statements, the `Notifier` port
 //! - [`ingest`]    the upsert rules of the Go store, planned as statements
-//! - [`deals`]     scoring stored listings with the `scorer` crate, ranking, filters
+//! - [`deals`]     `/api/deals` query parameters and the listing shape the scorer reads
+//! - [`scores`]    scoring the make/model groups an ingest touched, stored per listing
 //! - [`snapshot`]  the daily deals snapshot (statements + read shape)
 //! - [`telegram`]  optional Telegram message per alert, via Composio (request + text)
 //! - [`vision`]    optional AI photo check per alert, via Baseten (request + reply)
 //! - [`auth`]      bearer-token check
-//! - [`service`]   use cases over the `ListingStore` / `SnapshotStore` / `AlertStore` ports
+//! - [`service`]   use cases over the `ListingStore` / `ScoreStore` / `SnapshotStore` / `AlertStore` ports
 //! - `d1`          D1 implementation of the ports (wasm only)
 //! - `entry`       fetch + scheduled handlers, the composition root (wasm only)
 //! - `notify_http` the Telegram notifier that sends what `telegram`/`vision` plan (wasm only)
@@ -20,6 +21,7 @@ pub mod alerts;
 pub mod auth;
 pub mod deals;
 pub mod ingest;
+pub mod scores;
 pub mod service;
 pub mod snapshot;
 pub mod sql;

@@ -27,6 +27,21 @@ fn now_iso() -> String {
     js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default()
 }
 
+/// Cars not seen for this many days are retired by the cron (EXPIRE_AFTER_DAYS).
+const DEFAULT_EXPIRE_AFTER_DAYS: f64 = 14.0;
+
+/// The ISO time `EXPIRE_AFTER_DAYS` ago: cars last seen before it expire.
+fn expiry_cutoff(env: &Env) -> String {
+    let days = env
+        .var("EXPIRE_AFTER_DAYS")
+        .ok()
+        .and_then(|v| v.to_string().trim().parse::<f64>().ok())
+        .filter(|d| d.is_finite() && *d >= 1.0)
+        .unwrap_or(DEFAULT_EXPIRE_AFTER_DAYS);
+    let ms = js_sys::Date::now() - days * 86_400_000.0;
+    js_sys::Date::new(&worker::wasm_bindgen::JsValue::from_f64(ms)).to_iso_string().as_string().unwrap_or_default()
+}
+
 fn json_response(status: u16, body: &Value) -> Result<Response> {
     let headers = Headers::new();
     headers.set("Content-Type", "application/json; charset=utf-8")?;
@@ -128,6 +143,9 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
                     if out.new_alerts > 0 {
                         console_log!("alerts: {} new deal(s)", out.new_alerts);
                     }
+                    if out.rescored > 0 {
+                        console_log!("rescored {} car(s)", out.rescored);
+                    }
                     json_response(200, &serde_json::to_value(out)?)
                 }
                 Err(e) => error_response(&e),
@@ -184,7 +202,7 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         }
     };
     let cron = event.cron();
-    match service::take_snapshot(&db, default_min_comps(&env), &now_iso(), Some(cron.as_str())).await {
+    match service::take_snapshot(&db, default_min_comps(&env), &now_iso(), &expiry_cutoff(&env), Some(cron.as_str())).await {
         Ok(v) => console_log!(
             "snapshot stored: {} comps, {} scored, {} deals",
             v["comps"],

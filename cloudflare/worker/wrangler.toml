@@ -43,6 +43,9 @@ DEFAULT_MIN_COMPS = ""
 # Set "true" only if you also put Cloudflare Access on the Worker (DEPLOY.md).
 # .dev.vars sets it to "true" for local curl testing.
 PUBLIC_READ_API = "false"
+# Cars the crawler has not seen for this many days are marked removed by the
+# daily cron, so sold cars stop counting as comps (src/scores.rs).
+EXPIRE_AFTER_DAYS = "14"
 
 # Snipe alerts (src/alerts.rs): when a pushed listing is new, relisted or
 # cheaper and prices at least ALERT_MIN_DISCOUNT_PCT % under the local
