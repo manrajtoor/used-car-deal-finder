@@ -58,6 +58,8 @@ const help = `carbuyer — search used-car sites, store, and score
                           lespac      Quebec only (Montreal, 200 km)
                           facebook    quebec (default, 4 cities) | ontario (14) | a city: toronto ...
                           craigslist  montreal (default) | quebec | sherbrooke | toronto | ottawa ...
+                                      US (miles read as km): newyork | longisland | hudsonvalley |
+                                      newjersey | cnj | jerseyshore | newhaven
                           cargurus    montreal (default) | toronto (100 km around)
   --private / --dealer  restrict to private sellers or dealers
   --min-price --max-price      applied server-side

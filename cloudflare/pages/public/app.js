@@ -6,8 +6,11 @@ const status = document.getElementById('status');
 const table = document.getElementById('deals');
 const tbody = table.querySelector('tbody');
 
-const money = (n) => (n == null ? '-' : Math.round(n).toLocaleString('fr-CA') + ' $');
-const km = (n) => (n == null ? '-' : Math.round(n).toLocaleString('fr-CA'));
+// Prices are USD. Odometers are stored in km (the crawler converts US
+// miles on the way in) and shown in miles.
+const KM_PER_MILE = 1.609344;
+const money = (n) => (n == null ? '-' : '$' + Math.round(n).toLocaleString('en-US'));
+const miles = (n) => (n == null ? '-' : Math.round(n / KM_PER_MILE).toLocaleString('en-US'));
 
 function cell(text, cls) {
   const td = document.createElement('td');
@@ -36,7 +39,7 @@ function row(d) {
     cell(d.trimText, 'trim'),
     cell(money(d.price), 'num'),
     cell(money(s.baseline), 'num'),
-    cell(km(d.km), 'num'),
+    cell(miles(d.km), 'num'),
     cell(`${s.basis} · ${s.n} comps`),
     cell(d.sellerType === 'PrivateSeller' ? 'private' : 'dealer'),
     cell(d.city),
@@ -164,7 +167,7 @@ function alertCard(d) {
   li.append(
     pct,
     line('car', car || 'car'),
-    line('meta', `${money(d.price)} vs ${money(s.baseline)} · ${s.n ?? '?'} comps · ${km(d.km)} km`),
+    line('meta', `${money(d.price)} vs ${money(s.baseline)} · ${s.n ?? '?'} comps · ${miles(d.km)} mi`),
     line('meta', [d.sellerType === 'PrivateSeller' ? 'private' : 'dealer', d.city, `alerted ${ago(d.alertedAt)}`]
       .filter(Boolean).join(' · ')),
   );

@@ -9,7 +9,7 @@ compatibility_date = "2026-09-01"
 
 # Your Cloudflare account id (dashboard sidebar, or `npx wrangler whoami`).
 # Leave it commented to let wrangler pick the account you are logged into.
-# account_id = "<YOUR_ACCOUNT_ID>"
+account_id = "6ee4ddc736d57a5959194ece5cbf92c9"
 
 # The API is reachable at https://carbuyer-api.<your-subdomain>.workers.dev.
 # Put Cloudflare Access in front of it (DEPLOY.md, step 8).
@@ -25,7 +25,7 @@ command = "node build.mjs"
 [[d1_databases]]
 binding = "DB"                                        # env.d1("DB") in src/entry.rs
 database_name = "carbuyer"
-database_id = "b97b600d-446e-4df2-93a5-b710f0a99235"
+database_id = "d1c3d0d1-57be-4988-9007-055ada1b0f1b"
 migrations_dir = "../d1/migrations"
 
 # Daily re-score: stores the best deals in deal_snapshots / deal_snapshot_items.

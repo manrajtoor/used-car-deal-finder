@@ -41,7 +41,7 @@ func decodeBlock() map[string]any {
 	return map[string]any{
 		"minPostingId":         minPostingID,
 		"minPostedDate":        minPostedDate,
-		"locations":            []any{0, []any{49, "montreal"}, []any{175, "quebec"}, []any{25, "toronto"}},
+		"locations":            []any{0, []any{49, "montreal"}, []any{175, "quebec"}, []any{25, "toronto"}, []any{3, "newyork", "brk"}},
 		"locationDescriptions": []any{0, "Anytown", "VIN # " + strings.ToLower(syntheticVIN), "call 555 0100"},
 	}
 }
@@ -111,13 +111,15 @@ func defaultPost() string { return postPage("Très propre, jamais accidenté.", 
 
 func TestBuildURL(t *testing.T) {
 	cases := []struct {
-		area, seller, batch, path, err string
+		area, seller, batch, path, err, cc string
 	}{
 		{area: "montreal", seller: "all", batch: "49-0-360-0-0", path: "cta"},
 		{area: "quebec", seller: "private", batch: "175-0-360-0-0", path: "cto"},
 		{area: "sherbrooke", seller: "dealer", batch: "390-0-360-0-0", path: "ctd"},
 		{area: "toronto", seller: "all", batch: "25-0-360-0-0", path: "cta"},
 		{area: "london", seller: "all", batch: "234-0-360-0-0", path: "cta"},
+		{area: "newyork", seller: "all", batch: "3-0-360-0-0", path: "cta", cc: "US"},
+		{area: "newhaven", seller: "private", batch: "168-0-360-0-0", path: "cto", cc: "US"},
 		// The feed defaults to sfbay when the area id is missing: refuse instead.
 		{area: "atlantis", seller: "all", err: "unknown Craigslist area"},
 		{area: "montreal", seller: "rental", err: "unknown Craigslist seller type"},
@@ -134,9 +136,12 @@ func TestBuildURL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if c.cc == "" {
+				c.cc = "CA"
+			}
 			u, _ := url.Parse(got)
 			if u.Host != "sapi.craigslist.org" || u.Query().Get("batch") != c.batch ||
-				u.Query().Get("searchPath") != c.path || u.Query().Get("cc") != "CA" || u.Query().Get("lang") != "en" {
+				u.Query().Get("searchPath") != c.path || u.Query().Get("cc") != c.cc || u.Query().Get("lang") != "en" {
 				t.Errorf("url = %s", got)
 			}
 		})
@@ -157,6 +162,13 @@ func TestAreasAndHeaders(t *testing.T) {
 		{"kitchener", "https://kitchener.craigslist.org/", "ON", 214},
 		{"london", "https://londonon.craigslist.org/", "ON", 234},
 		{"windsor", "https://windsor.craigslist.org/", "ON", 235},
+		{"newyork", "https://newyork.craigslist.org/", "NY", 3},
+		{"longisland", "https://longisland.craigslist.org/", "NY", 250},
+		{"hudsonvalley", "https://hudsonvalley.craigslist.org/", "NY", 249},
+		{"newjersey", "https://newjersey.craigslist.org/", "NJ", 170},
+		{"cnj", "https://cnj.craigslist.org/", "NJ", 349},
+		{"jerseyshore", "https://jerseyshore.craigslist.org/", "NJ", 561},
+		{"newhaven", "https://newhaven.craigslist.org/", "CT", 168},
 	}
 	for _, c := range cases {
 		a := Areas[c.area]
@@ -248,6 +260,16 @@ func TestParseSearch(t *testing.T) {
 			*l.ResultType != "Organic" || l.ImageCount != 2 || l.Source != "craigslist" {
 			b, _ := json.Marshal(l)
 			t.Errorf("listing = %s", b)
+		}
+	})
+
+	t.Run("a New York area is NY, and its miles become km", func(t *testing.T) {
+		p, err := ParseSearch(feed([][]any{item(itemOpts{place: "4:1~40.6~-73.9", km: 99000})}, 1), match, "newyork")
+		if err != nil || len(p.Listings) != 1 {
+			t.Fatalf("%v %+v", err, p)
+		}
+		if l := p.Listings[0]; *l.Province != "NY" || *l.Km != 159325 {
+			t.Errorf("province=%v km=%v, want NY 159325", *l.Province, *l.Km)
 		}
 	})
 
@@ -374,6 +396,19 @@ func (f *fakeFetcher) FetchWithHeaders(ctx context.Context, u string, h map[stri
 	return f.Fetch(ctx, u)
 }
 
+func TestAreaToKm(t *testing.T) {
+	v := listing.Num(100000)
+	if got := Areas["toronto"].ToKm(v); got != v {
+		t.Errorf("a Canadian reading changed: %v", *got)
+	}
+	if got := Areas["newyork"].ToKm(v); *got != 160934 {
+		t.Errorf("100 000 miles = %v km, want 160934", *got)
+	}
+	if Areas["newyork"].ToKm(nil) != nil {
+		t.Error("no reading must stay no reading")
+	}
+}
+
 func TestCrawl(t *testing.T) {
 	ctx := context.Background()
 
@@ -416,6 +451,18 @@ func TestCrawl(t *testing.T) {
 		}
 		if len(c.Listings) != 2 || c.PagesFailed != 1 || c.PagesRead != 1 || len(logs) != 3 {
 			t.Errorf("listings=%d failed=%d read=%d logs=%v", len(c.Listings), c.PagesFailed, c.PagesRead, logs)
+		}
+	})
+
+	t.Run("a US post page's odometer is miles too", func(t *testing.T) {
+		f := &fakeFetcher{feed: feed([][]any{item(itemOpts{id: 1, place: "4:1~40.6~-73.9", km: "none"})}, 1)}
+		c, err := New(f, WithMatcher(match)).Crawl(ctx, listing.Query{Geo: "newyork"})
+		if err != nil || len(c.Listings) != 1 {
+			t.Fatalf("%v %+v", err, c)
+		}
+		// The feed had no number, so the post page's "159 000" (miles) is used.
+		if km := c.Listings[0].Km; km == nil || *km != 255886 {
+			t.Errorf("km = %v, want 255886", *km)
 		}
 	})
 

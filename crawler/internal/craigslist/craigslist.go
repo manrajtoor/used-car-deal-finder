@@ -40,36 +40,63 @@ const PageSize = 360
 // DefaultReadPages caps how many post pages one crawl opens.
 const DefaultReadPages = 100
 
-// Area is one Craigslist site: the subdomain, the area id the feed wants, and
-// the province its cars are in.
+// Area is one Craigslist site: the subdomain, the area id the feed wants, the
+// province (or state) its cars are in, and its country.
 type Area struct {
 	Host     string
 	ID       int
 	Province string
+	Country  string // "CA" or "US": the feed's cc, and the odometer unit
+}
+
+// KmPerMile converts a US odometer reading.
+const KmPerMile = 1.609344
+
+// Miles is true when sellers in this area write the odometer in miles.
+func (a Area) Miles() bool { return a.Country == "US" }
+
+// ToKm converts an odometer reading from this area's unit to whole km.
+func (a Area) ToKm(v *float64) *float64 {
+	if v == nil || !a.Miles() {
+		return v
+	}
+	return listing.Num(math.Round(*v * KmPerMile))
 }
 
 // Areas are the Craigslist sites this crawler knows, keyed by geo name. The
 // key is the subdomain except for London, whose subdomain is "londonon"
 // ("london" is the UK). Every id was confirmed against Craigslist's own area
-// list (reference.craigslist.org/Areas, 2026-09-29). Trois-Rivières and
-// Saguenay are left out: they redirect to the regional hub and have no cars.
+// list (reference.craigslist.org/Areas, 2026-09-29; the US ones 2026-09-30).
+// Trois-Rivières and Saguenay are left out: they redirect to the regional hub
+// and have no cars.
 var Areas = map[string]Area{
-	"montreal":   {"montreal", 49, "QC"},
-	"quebec":     {"quebec", 175, "QC"},
-	"sherbrooke": {"sherbrooke", 390, "QC"},
+	"montreal":   {"montreal", 49, "QC", "CA"},
+	"quebec":     {"quebec", 175, "QC", "CA"},
+	"sherbrooke": {"sherbrooke", 390, "QC", "CA"},
 
-	"toronto":      {"toronto", 25, "ON"},
-	"ottawa":       {"ottawa", 76, "ON"},
-	"hamilton":     {"hamilton", 213, "ON"},
-	"kitchener":    {"kitchener", 214, "ON"},
-	"london":       {"londonon", 234, "ON"},
-	"windsor":      {"windsor", 235, "ON"},
-	"niagara":      {"niagara", 386, "ON"},
-	"guelph":       {"guelph", 482, "ON"},
-	"barrie":       {"barrie", 389, "ON"},
-	"kingston":     {"kingston", 385, "ON"},
-	"peterborough": {"peterborough", 388, "ON"},
-	"sudbury":      {"sudbury", 384, "ON"},
+	"toronto":      {"toronto", 25, "ON", "CA"},
+	"ottawa":       {"ottawa", 76, "ON", "CA"},
+	"hamilton":     {"hamilton", 213, "ON", "CA"},
+	"kitchener":    {"kitchener", 214, "ON", "CA"},
+	"london":       {"londonon", 234, "ON", "CA"},
+	"windsor":      {"windsor", 235, "ON", "CA"},
+	"niagara":      {"niagara", 386, "ON", "CA"},
+	"guelph":       {"guelph", 482, "ON", "CA"},
+	"barrie":       {"barrie", 389, "ON", "CA"},
+	"kingston":     {"kingston", 385, "ON", "CA"},
+	"peterborough": {"peterborough", 388, "ON", "CA"},
+	"sudbury":      {"sudbury", 384, "ON", "CA"},
+
+	// New York tri-state. "newyork" already covers the five boroughs, Long
+	// Island, Westchester, Fairfield County CT and Jersey City as sub-areas,
+	// all carrying its area id; the other sites are separate areas.
+	"newyork":      {"newyork", 3, "NY", "US"},
+	"longisland":   {"longisland", 250, "NY", "US"},
+	"hudsonvalley": {"hudsonvalley", 249, "NY", "US"},
+	"newjersey":    {"newjersey", 170, "NJ", "US"},
+	"cnj":          {"cnj", 349, "NJ", "US"},
+	"jerseyshore":  {"jerseyshore", 561, "NJ", "US"},
+	"newhaven":     {"newhaven", 168, "CT", "US"},
 }
 
 // DefaultArea is searched when the query names none.
@@ -94,7 +121,7 @@ func BuildURL(area, sellerType string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("unknown Craigslist seller type %q", sellerType)
 	}
-	return fmt.Sprintf("%s?batch=%d-0-%d-0-0&cc=CA&lang=en&searchPath=%s", API, a.ID, PageSize, path), nil
+	return fmt.Sprintf("%s?batch=%d-0-%d-0-0&cc=%s&lang=en&searchPath=%s", API, a.ID, PageSize, a.Country, path), nil
 }
 
 // Headers are what the feed checks, as a browser's call would carry.
@@ -328,7 +355,7 @@ func readLocation(text *string) (city, vin *string) {
 
 // Normalize maps a decoded item into a Listing (JS normalizeCraigslist).
 // match may be nil, which leaves make, model and year unset.
-func Normalize(d *Decoded, match Matcher, province string) (listing.Listing, Extra) {
+func Normalize(d *Decoded, match Matcher, a Area) (listing.Listing, Extra) {
 	title := ""
 	if d.Title != nil {
 		title = *d.Title
@@ -348,13 +375,13 @@ func Normalize(d *Decoded, match Matcher, province string) (listing.Listing, Ext
 		ID: listing.Str("craigslist:" + id), ReferenceID: listing.Str(id), URL: d.URL, Source: "craigslist",
 		Price: d.Price,
 		Year:  v.Year, Make: v.Make, Model: v.Model, TrimText: listing.Str(title),
-		// Canadian areas report distance in km, and sellers fill the odometer
-		// in the same unit: a 2006 Avalon reads 159 000, not 99 000.
-		Km: d.Odometer,
+		// Sellers fill the odometer in their country's unit: a Canadian 2006
+		// Avalon reads 159 000 (km), a New York one 99 000 (miles).
+		Km: a.ToKm(d.Odometer),
 		// Transmission, fuel and the damage flags are not in the feed; the
 		// post page has them (MergePost).
 		Condition: listing.Str("U"),
-		City:      city, Province: listing.Str(province),
+		City:      city, Province: listing.Str(a.Province),
 		ImageCount: len(d.Images), ImageURLs: append([]string{}, images...),
 		ResultType: listing.Str("Organic"),
 	}
@@ -399,9 +426,8 @@ func ParseSearch(body string, match Matcher, area string) (SearchPage, error) {
 	decode, _ := data["decode"].(map[string]any)
 
 	a, known := Areas[area]
-	province := "QC"
-	if known {
-		province = a.Province
+	if !known {
+		a = Area{Province: "QC", Country: "CA"}
 	}
 	page := SearchPage{Listings: []listing.Listing{}, Extras: []Extra{}}
 	if t, ok := data["totalResultCount"].(float64); ok {
@@ -423,7 +449,7 @@ func ParseSearch(body string, match Matcher, area string) (SearchPage, error) {
 				continue
 			}
 		}
-		l, x := Normalize(d, match, province)
+		l, x := Normalize(d, match, a)
 		page.Listings = append(page.Listings, l)
 		page.Extras = append(page.Extras, x)
 	}
@@ -692,6 +718,9 @@ func (s *Source) Crawl(ctx context.Context, q listing.Query) (Crawl, error) {
 		var post *Post
 		if err == nil {
 			post, err = ParsePost(html)
+		}
+		if post != nil {
+			post.Km = Areas[area].ToKm(post.Km) // the post's odometer is in the area's unit too
 		}
 		if err != nil {
 			if ctx.Err() != nil {

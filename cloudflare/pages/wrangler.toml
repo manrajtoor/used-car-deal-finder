@@ -6,7 +6,7 @@
 #
 # Nothing here is deployed until you run `npx wrangler pages deploy` yourself.
 
-name = "carbuyer-dashboard"
+name = "tristate-carbuyer"
 pages_build_output_dir = "public"
 compatibility_date = "2026-09-01"
 
