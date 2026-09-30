@@ -302,6 +302,27 @@ mod tests {
     }
 
     #[test]
+    fn a_jersey_car_prices_against_new_york_comps_but_not_ontario_ones() {
+        let mut rows: Vec<Value> = (0..12)
+            .map(|i| {
+                json!({"id": format!("ny{i}"), "source": "craigslist", "make": "Honda", "model": "Civic",
+                       "year": 2018, "km": 90000 + i * 2000, "price": 15000 + (i % 3) * 300,
+                       "province": if i % 2 == 0 { "NY" } else { "CT" }, "sellerType": "Dealer"})
+            })
+            .collect();
+        let car = |id: &str, province: &str| {
+            json!({"id": id, "source": "craigslist", "make": "Honda", "model": "Civic", "year": 2018,
+                   "km": 95000, "price": 12000, "province": province, "sellerType": "Dealer"})
+        };
+        rows.push(car("nj", "NJ"));
+        rows.push(car("on", "ON"));
+        let out = run(&json!({"listings": rows})).unwrap();
+        let score = |id: &str| out["scores"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap()["score"].clone();
+        assert!(score("nj")["discountPct"].as_f64().unwrap() > 15.0, "NJ joins the NY/CT market: {}", score("nj"));
+        assert!(score("on").is_null(), "an Ontario car has no Ontario comps and is not priced against New York");
+    }
+
+    #[test]
     fn craigslist_dealers_make_a_baseline_and_its_private_sellers_are_scored() {
         let mut rows: Vec<Value> = (0..12)
             .map(|i| {

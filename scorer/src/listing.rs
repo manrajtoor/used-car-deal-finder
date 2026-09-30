@@ -21,6 +21,7 @@ pub struct Listing {
     /// An already-resolved trim, if the caller has one. Normally absent.
     pub trim: Option<String>,
     pub seller_type: Option<String>,
+    /// The price market, not always the literal province: see [`market`].
     pub province: Option<String>,
     pub is_damaged: Value,
     pub is_parts: Value,
@@ -33,6 +34,22 @@ fn string(v: Option<&Value>) -> Option<String> {
 
 fn number(v: Option<&Value>) -> Option<f64> {
     v.and_then(Value::as_f64)
+}
+
+/// The tri-state market: New York City's metro area spans three states.
+pub const NY_TRISTATE: &str = "NY-NJ-CT";
+
+/// The market a province or state prices in. Buckets never mix markets, so
+/// Ontario and Quebec stay apart, but a car in Jersey City competes with one
+/// in Brooklyn: NY, NJ and CT form one market. That assumes the NY and CT
+/// cars are from the metro area, which is all the crawler reads (Craigslist
+/// newyork, longisland, hudsonvalley, newhaven); an upstate area such as
+/// Buffalo would need its own market here.
+pub fn market(province: Option<String>) -> Option<String> {
+    match province.as_deref() {
+        Some("NY" | "NJ" | "CT") => Some(NY_TRISTATE.to_string()),
+        _ => province,
+    }
 }
 
 impl Listing {
@@ -49,7 +66,7 @@ impl Listing {
             trim_text: string(get("trimText")),
             trim: string(get("trim")),
             seller_type: string(get("sellerType")),
-            province: string(get("province")),
+            province: market(string(get("province"))),
             is_damaged: get("isDamaged").cloned().unwrap_or(Value::Null),
             is_parts: get("isParts").cloned().unwrap_or(Value::Null),
             is_conditional_price: get("isConditionalPrice").cloned().unwrap_or(Value::Null),
@@ -65,6 +82,18 @@ impl Listing {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_tristate_is_one_market_and_other_regions_stay_apart() {
+        for st in ["NY", "NJ", "CT"] {
+            assert_eq!(market(Some(st.into())).as_deref(), Some(NY_TRISTATE));
+        }
+        assert_eq!(market(Some("ON".into())).as_deref(), Some("ON"));
+        assert_eq!(market(Some("QC".into())).as_deref(), Some("QC"));
+        assert_eq!(market(Some("PA".into())).as_deref(), Some("PA"));
+        assert_eq!(market(None), None);
+        assert_eq!(Listing::from_value(&json!({"province": "NJ"})).province.as_deref(), Some(NY_TRISTATE));
+    }
 
     #[test]
     fn reads_the_crawler_shape() {
