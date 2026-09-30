@@ -1,0 +1,21 @@
+# Facebook Marketplace for the New York tri-state area. Not in the scheduled
+# GitHub crawl (searches.yml): Marketplace blocked every request from GitHub's
+# runners on 2026-09-30, while the same requests work from a home connection.
+# Run it from your own machine:
+#
+#   CARBUYER_INGEST_TOKEN=... go run ./cmd/carbuyer --searches searches-facebook.yml \
+#     --no-score --push https://carbuyer-api.<you>.workers.dev
+#
+# Three newest-first requests, one per $10 000 band up to maxPrice.
+
+delaySeconds: 3
+
+defaults:
+  seller: any
+  maxPrice: 30000    # USD
+  pages: 3
+  newest: true
+
+searches:
+  - source: facebook      # Marketplace, logged out; the one "nyc" place covers NY, NJ, CT
+    geo: tristate

@@ -25,9 +25,8 @@ defaults:
   pages: 1
   newest: true       # newest listings first: new deals show up on page 1
 
-# New York tri-state: Craigslist and Facebook Marketplace. AutoHebdo, Kijiji
-# and LesPAC are Canadian; CarGurus refuses automated requests (HTTP 406,
-# checked 2026-09-30). Odometers are miles
+# New York tri-state: Craigslist. AutoHebdo, Kijiji and LesPAC are Canadian;
+# CarGurus refuses automated requests (HTTP 406, checked 2026-09-30). Odometers are miles
 # on the site; the crawler stores km. Each area is one feed request plus up to
 # 20 ad pages (~21 requests, ~1 min at 3 s), so the seven areas take ~8 min: a
 # run every 5 minutes then waits for the one before (concurrency: crawl).
@@ -48,10 +47,8 @@ searches:
     geo: hudsonvalley     # Westchester north to Poughkeepsie
   - source: craigslist
     geo: newhaven         # CT; Fairfield County is inside "newyork"
-  # Last: the most fragile site, and the run stops at the first error.
-  - source: facebook      # Marketplace, logged out; the one "nyc" place covers NY, NJ, CT
-    geo: tristate
-    pages: 3              # one newest-first request per $10 000 band up to maxPrice ($30 000)
+  # Facebook Marketplace is in searches-facebook.yml: it refuses GitHub's
+  # runners (all requests blocked from Actions, fine from a home connection).
 
 # More ideas. Check a new slug once by hand before adding it (one page, polite):
 #   go run ./cmd/carbuyer --make honda --model cr-v --pages 1 --no-score

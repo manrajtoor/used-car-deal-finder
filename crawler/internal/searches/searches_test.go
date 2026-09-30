@@ -83,18 +83,20 @@ func TestParseErrors(t *testing.T) {
 	}
 }
 
-// The file shipped in the repo must always load.
+// The files shipped in the repo must always load.
 func TestShippedSearchesFile(t *testing.T) {
-	plan, err := Load(filepath.Join("..", "..", "searches.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plan.Searches) == 0 || plan.Delay < MinDelay {
-		t.Errorf("plan = %+v", plan)
-	}
-	for _, s := range plan.Searches {
-		if s.Query.PriceTo == nil || s.Query.MaxPages > 3 {
-			t.Errorf("%s: keep the default crawl capped and small: %+v", s.Name, s.Query)
+	for _, name := range []string{"searches.yml", "searches-facebook.yml"} {
+		plan, err := Load(filepath.Join("..", "..", name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(plan.Searches) == 0 || plan.Delay < MinDelay {
+			t.Errorf("%s: plan = %+v", name, plan)
+		}
+		for _, s := range plan.Searches {
+			if s.Query.PriceTo == nil || s.Query.MaxPages > 3 {
+				t.Errorf("%s: %s: keep the default crawl capped and small: %+v", name, s.Name, s.Query)
+			}
 		}
 	}
 }
