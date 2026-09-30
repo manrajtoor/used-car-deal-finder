@@ -87,8 +87,9 @@ pub struct Existing {
 /// How often an unchanged listing's `last_seen` is refreshed. Rewriting every
 /// seen car on every push cost ~2 400 D1 row writes per crawl, over the Free
 /// plan's 100 000 a day at one crawl every few minutes; `last_seen` only
-/// feeds the 14-day expiry, so once a day is plenty.
-pub const TOUCH_EVERY_HOURS: i64 = 24;
+/// feeds the 14-day expiry, so every three days is plenty. (Each rewrite also
+/// updates the last_seen index, and D1 counts those rows too.)
+pub const TOUCH_EVERY_HOURS: i64 = 72;
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
 /// days_from_civil), and back: enough date arithmetic for ISO timestamps
@@ -584,11 +585,13 @@ mod tests {
         let l = json!({"id": "a", "price": 100});
         let mut p = Planner::new(HashMap::from([("a".into(), known("2026-09-30T02:00:00.000Z", false, false))]));
         assert!(p.plan(&l, &scope).is_empty(), "seen 10 h ago at the same price: nothing to write");
+        let mut p = Planner::new(HashMap::from([("a".into(), known("2026-09-28T13:00:00.000Z", false, false))]));
+        assert!(p.plan(&l, &scope).is_empty(), "seen 47 h ago: still within the three days");
         assert_eq!((p.stats.seen, p.stats.unchanged), (1, 1));
         assert!(p.fresh.is_empty());
 
         let cases = [
-            ("seen over a day ago: last_seen refreshed", known("2026-09-29T11:00:00.000Z", false, false), json!({"id": "a", "price": 100})),
+            ("seen over three days ago: last_seen refreshed", known("2026-09-27T11:00:00.000Z", false, false), json!({"id": "a", "price": 100})),
             ("price changed", known("2026-09-30T11:00:00.000Z", false, false), json!({"id": "a", "price": 90})),
             ("back after a removal", known("2026-09-30T11:00:00.000Z", true, false), json!({"id": "a", "price": 100})),
             ("its ad page was just read", known("2026-09-30T11:00:00.000Z", false, false),
