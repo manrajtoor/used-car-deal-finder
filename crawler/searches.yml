@@ -28,10 +28,10 @@ defaults:
 # New York tri-state, Craigslist only for now: AutoHebdo, Kijiji and LesPAC are
 # Canadian, and CarGurus / Facebook still point at Canada. Odometers are miles
 # on the site; the crawler stores km. Each area is one feed request plus up to
-# 20 ad pages (~21 requests, ~1 min at 3 s), so four areas fit a 5-minute run.
+# 20 ad pages (~21 requests, ~1 min at 3 s), so the seven areas take ~8 min: a
+# run every 5 minutes then waits for the one before (concurrency: crawl).
 # "newyork" alone has ~3 700 cars, more than one 360-car feed page, so each run
-# sees the newest 360 (a truncated walk: sold cars are not retired).
-# Other areas: jerseyshore, hudsonvalley, newhaven.
+# sees the newest 360; sold cars are retired by the Worker's 14-day expiry.
 searches:
   - source: craigslist
     geo: newyork          # 5 boroughs, Long Island, Westchester, Fairfield CT, Jersey City
@@ -41,6 +41,12 @@ searches:
     geo: longisland
   - source: craigslist
     geo: cnj              # central Jersey
+  - source: craigslist
+    geo: jerseyshore
+  - source: craigslist
+    geo: hudsonvalley     # Westchester north to Poughkeepsie
+  - source: craigslist
+    geo: newhaven         # CT; Fairfield County is inside "newyork"
 
 # More ideas. Check a new slug once by hand before adding it (one page, polite):
 #   go run ./cmd/carbuyer --make honda --model cr-v --pages 1 --no-score
