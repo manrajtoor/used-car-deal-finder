@@ -490,6 +490,25 @@ func TestCrawl(t *testing.T) {
 		}
 	})
 
+	t.Run("the read lookup stops once the page budget is covered", func(t *testing.T) {
+		var items [][]any
+		for i := 1; i <= 300; i++ {
+			items = append(items, item(itemOpts{id: i}))
+		}
+		f := &fakeFetcher{feed: feed(items, 300)}
+		var calls []int
+		lookup := func(_ context.Context, ids []string) (map[string]bool, error) {
+			calls = append(calls, len(ids))
+			return map[string]bool{}, nil // nothing read before
+		}
+		if _, err := New(f, WithReadPages(2), WithReadLookup(lookup)).Crawl(ctx, listing.Query{}); err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) != 1 || calls[0] != LookupChunk {
+			t.Errorf("lookup calls = %v, want one of %d ids", calls, LookupChunk)
+		}
+	})
+
 	t.Run("a failed read lookup reads pages as before", func(t *testing.T) {
 		f := &fakeFetcher{feed: feed([][]any{item(itemOpts{id: 1})}, 1)}
 		lookup := func(context.Context, []string) (map[string]bool, error) { return nil, errors.New("worker down") }

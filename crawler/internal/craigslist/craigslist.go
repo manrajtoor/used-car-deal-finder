@@ -670,6 +670,9 @@ func WithReadPages(n int) Option { return func(s *Source) { s.ReadPages = n } }
 // WithStored sets the lookup for listings already read.
 func WithStored(f func(id string) (*string, bool)) Option { return func(s *Source) { s.Stored = f } }
 
+// LookupChunk is how many ids one ReadLookup call carries.
+const LookupChunk = 90
+
 // WithReadLookup sets the batch lookup for listings read in an earlier run.
 func WithReadLookup(f func(ctx context.Context, ids []string) (map[string]bool, error)) Option {
 	return func(s *Source) { s.ReadLookup = f }
@@ -838,18 +841,35 @@ func (s *Source) Crawl(ctx context.Context, q listing.Query) (Crawl, error) {
 	c := Crawl{Area: area, Extras: map[string]Extra{}, OutOfArea: page.OutOfArea}
 	c.URL, c.Total, c.Pages, c.PagesWalked = url, page.Total, listing.Num(float64(feedRequests)), feedRequests
 	ready := make([]listing.Listing, 0, len(page.Listings))
+	// Ask in feed order, newest first, and stop once enough unread ads are
+	// known to fill the page budget: each id asked is a row the Worker reads.
 	var readBefore map[string]bool
 	if s.ReadLookup != nil && s.ReadPages > 0 {
-		ids := make([]string, 0, len(page.Listings))
-		for _, l := range page.Listings {
-			ids = append(ids, l.Key())
+		readBefore = map[string]bool{}
+		asked, unread := 0, 0
+		for start := 0; start < len(page.Listings) && unread < s.ReadPages; start += LookupChunk {
+			end := min(start+LookupChunk, len(page.Listings))
+			ids := make([]string, 0, end-start)
+			for _, l := range page.Listings[start:end] {
+				ids = append(ids, l.Key())
+			}
+			got, err := s.ReadLookup(ctx, ids)
+			if err != nil {
+				s.logf("  ! read lookup failed, reading pages as usual: %s", err)
+				readBefore = nil
+				break
+			}
+			for _, id := range ids {
+				if got[id] {
+					readBefore[id] = true
+				} else {
+					unread++
+				}
+			}
+			asked = end
 		}
-		var err error
-		if readBefore, err = s.ReadLookup(ctx, ids); err != nil {
-			s.logf("  ! read lookup failed, reading pages as usual: %s", err)
-			readBefore = nil
-		} else {
-			s.logf("  %d of %d ad pages already read in an earlier run", len(readBefore), len(ids))
+		if readBefore != nil {
+			s.logf("  %d of %d ad pages asked about were read in an earlier run", len(readBefore), asked)
 		}
 	}
 	for i, l := range page.Listings {

@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"carbuyer/crawler/internal/fetch"
 	"carbuyer/crawler/internal/listing"
@@ -82,6 +83,10 @@ const help = `carbuyer — search used-car sites, store, and score
                         one after another, one request at a time, and stop at
                         the first error. Replaces --make/--model/--pages/...
   --no-score            store (and push) only; skip the local Rust scorer
+  --price-bands <when>  Craigslist areas over one 360-car page are walked in
+                        price bands: always (default) | hourly (only in runs
+                        starting in the first 10 minutes of a UTC hour, as the
+                        scheduled crawl does) | never
 `
 
 type options struct {
@@ -93,6 +98,7 @@ type options struct {
 	minPrice, maxPrice, minYear, maxYear        string
 	pages, top                                  int
 	minComps                                    string
+	priceBands                                  string
 }
 
 func defaultScorer() string {
@@ -133,6 +139,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&o.push, "push", "", "")
 	fs.StringVar(&o.searches, "searches", "", "")
 	fs.BoolVar(&o.noScore, "no-score", false, "")
+	fs.StringVar(&o.priceBands, "price-bands", "always", "")
 	return o, fs.Parse(args)
 }
 
@@ -317,6 +324,20 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// One throttled fetcher for the whole run: requests never overlap and are
 	// spaced by `delay`, across searches too.
 	kit := &sourceKit{throttle: fetch.NewThrottle(delay)}
+	switch o.priceBands {
+	case "always":
+		kit.bands = func() bool { return true }
+	case "never":
+		kit.bands = func() bool { return false }
+	case "hourly":
+		// Deep walks feed comps; new deals show on the newest page, which
+		// every run reads. Twice an hour keeps D1 reads (each pushed car is
+		// looked up) inside the Free plan.
+		kit.bands = func() bool { return time.Now().UTC().Minute() < 10 }
+	default:
+		fmt.Fprintf(stderr, "--price-bands: %q is not always, hourly or never\n", o.priceBands)
+		return 2
+	}
 	if o.offline != "" {
 		body, err := os.ReadFile(o.offline)
 		if err != nil {

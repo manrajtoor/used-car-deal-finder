@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use serde_json::{json, Value};
 
 use crate::deals::{DealsQuery, LOAD_SELECT};
-use crate::sql::{placeholders, Param, Stmt};
+use crate::sql::{Param, Stmt};
 
 /// A (make, model) pair: everything the scorer compares a car with.
 pub type Group = (String, String);
@@ -51,17 +51,22 @@ pub fn fresh_groups(listings: &[Value], fresh: &[String]) -> Vec<Group> {
 
 /// Active listings of `groups`, in insertion order within each query, each
 /// with `has_score` (1 when `listing_scores` already holds a row for it).
+/// Written as `(make = ? AND model = ?) OR ...` with `+removed_at` so SQLite
+/// answers each term from idx_listings_model (a MULTI-INDEX OR); otherwise
+/// it walked every active row through idx_listings_active, and the earlier
+/// `(make, model) IN (VALUES ...)` scanned the table (~2 600 rows per call).
 pub fn group_queries(groups: &[Group]) -> Vec<Stmt> {
     groups
         .chunks(GROUPS_PER_QUERY)
         .map(|chunk| {
-            let values: Vec<String> = (0..chunk.len()).map(|i| format!("({})", placeholders(2 * i + 1, 2))).collect();
+            let terms: Vec<String> =
+                (0..chunk.len()).map(|i| format!("(make = ?{} AND model = ?{})", 2 * i + 1, 2 * i + 2)).collect();
             Stmt::new(
                 format!(
-                    "{} FROM listings WHERE removed_at IS NULL AND (make, model) IN (VALUES {}) ORDER BY rowid",
+                    "{} FROM listings WHERE +removed_at IS NULL AND ({}) ORDER BY rowid",
                     LOAD_SELECT.trim_end_matches(" FROM listings").to_string()
                         + ", EXISTS (SELECT 1 FROM listing_scores s WHERE s.listing_id = listings.id) AS has_score",
-                    values.join(", ")
+                    terms.join(" OR ")
                 ),
                 chunk.iter().flat_map(|(mk, md)| [Param::Text(mk.clone()), Param::Text(md.clone())]).collect(),
             )
@@ -235,8 +240,8 @@ mod tests {
         let qs = group_queries(&groups);
         assert_eq!(qs.len(), 3);
         assert_eq!(qs[0].params.len(), 90);
-        assert!(qs[0].sql.contains("(make, model) IN (VALUES (?1, ?2), (?3, ?4)"), "{}", qs[0].sql);
-        assert!(qs[2].sql.ends_with("(?19, ?20)) ORDER BY rowid"), "{}", qs[2].sql);
+        assert!(qs[0].sql.contains("WHERE +removed_at IS NULL AND ((make = ?1 AND model = ?2) OR (make = ?3 AND model = ?4) OR"), "{}", qs[0].sql);
+        assert!(qs[2].sql.ends_with("(make = ?19 AND model = ?20)) ORDER BY rowid"), "{}", qs[2].sql);
         assert!(qs[0].sql.starts_with("SELECT id, source") && qs[0].sql.contains("AS has_score FROM listings WHERE"), "{}", qs[0].sql);
     }
 

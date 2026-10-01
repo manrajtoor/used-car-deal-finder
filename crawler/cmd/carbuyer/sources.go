@@ -30,6 +30,8 @@ type sourceKit struct {
 	// described asks the Worker which listings' ad pages were read before
 	// (--push only); the local SQLite file of a scheduled run is always new.
 	described func(ctx context.Context, ids []string) (map[string]bool, error)
+	// bands reports whether this run walks Craigslist price bands (--price-bands).
+	bands func() bool
 }
 
 func (k *sourceKit) fetcher(client *fetch.HTTPFetcher) fetch.Fetcher {
@@ -94,6 +96,9 @@ func (k *sourceKit) build(ctx context.Context, name string) (source.Source, erro
 		})}
 		if k.described != nil {
 			opts = append(opts, craigslist.WithReadLookup(k.described))
+		}
+		if k.bands != nil && !k.bands() {
+			opts = append(opts, craigslist.WithMaxFeedRequests(1))
 		}
 		return craigslist.New(f, opts...), nil
 	case "marketplace":

@@ -68,5 +68,9 @@ jobs:
           CARBUYER_API_URL: ${{ vars.CARBUYER_API_URL }}
           SEARCHES: ${{ inputs.searches || 'searches.yml' }}
         run: |
-          "$RUNNER_TEMP/carbuyer" --searches "$SEARCHES" --no-score \
+          # --price-bands hourly: big Craigslist areas are walked in price
+          # bands (every car, for comps) only in runs starting in the first
+          # 10 minutes of the hour; the others read the newest page, where new
+          # deals appear. Keeps D1 reads inside the Free plan.
+          "$RUNNER_TEMP/carbuyer" --searches "$SEARCHES" --no-score --price-bands hourly \
             --db "$RUNNER_TEMP/carbuyer.db" --push "$CARBUYER_API_URL"
