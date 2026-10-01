@@ -1,0 +1,19 @@
+# Temporary: does OfferUp answer a request from a GitHub runner? Deleted after one run.
+name: zz-probe-offerup
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: One request to OfferUp
+        run: |
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+          code=$(curl -s -L -m 25 -A "$UA" -H 'accept: text/html,*/*;q=0.8' -H 'accept-language: en-US,en;q=0.9' \
+            -o page.html -w '%{http_code}' 'https://offerup.com/explore/sck/ny/new_york/cars-trucks')
+          echo "HTTP $code, $(wc -c < page.html) bytes"
+          echo "listingIds: $(grep -o '"listingId":"[^"]*"' page.html | sort -u | wc -l)"
+          echo "captcha mentions: $(grep -o -i 'captcha' page.html | wc -l)"
+          echo "sample: $(grep -o '"title":"[^"]*","[a-zA-Z]*":[^,]*' page.html | head -3 | tr '\n' ' ')"
