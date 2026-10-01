@@ -795,6 +795,9 @@ func (s *Source) bandWalk(ctx context.Context, area, url string, first SearchPag
 				continue
 			}
 			seen[l.Key()] = true
+			// The first page holds the newest PageSize cars; anything only a
+			// band reaches is older, a comp rather than a fresh deal.
+			l.CompOnly = true
 			merged.Listings = append(merged.Listings, l)
 			merged.Extras = append(merged.Extras, page.Extras[i])
 		}

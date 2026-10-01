@@ -669,6 +669,17 @@ func TestBandWalk(t *testing.T) {
 		if len(c.Listings) != 2000 || c.Truncated {
 			t.Errorf("got %d of 2000, truncated=%v, %d requests", len(c.Listings), c.Truncated, len(site.urls))
 		}
+		comps := 0
+		for i, l := range c.Listings {
+			if l.CompOnly {
+				comps++
+			} else if i >= PageSize {
+				t.Errorf("%s came from a band but is not marked CompOnly", l.Key())
+			}
+		}
+		if comps != 2000-PageSize {
+			t.Errorf("CompOnly = %d, want %d (everything past the first page)", comps, 2000-PageSize)
+		}
 		if len(site.urls) > DefaultMaxFeedRequests || !strings.Contains(site.urls[1], "min_price=") {
 			t.Errorf("requests: %v", site.urls)
 		}

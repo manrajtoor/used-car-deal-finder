@@ -48,6 +48,10 @@ type Listing struct {
 	// "Organic" means it matched the query; anything else was injected by the site.
 	ResultType    *string `json:"resultType"`
 	ResultSection *string `json:"resultSection"`
+	// CompOnly marks an older listing found only by a deep walk (Craigslist
+	// price bands): the Worker stores it as a comp but neither rescores nor
+	// alerts on it, since it is not a new posting. Never stored locally.
+	CompOnly bool `json:"compOnly,omitempty"`
 }
 
 // Key is the listing id, or "" when the source gave none.

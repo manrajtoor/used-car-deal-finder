@@ -115,7 +115,7 @@ func (c *Client) Save(ctx context.Context, listings []listing.Listing, scope sto
 	var total Stats
 	for start := 0; start < len(listings); start += size {
 		end := min(start+size, len(listings))
-		s, err := c.post(ctx, wireBody{
+		s, err := c.postRetrying(ctx, wireBody{
 			Listings: listings[start:end],
 			Scope:    wireScope{MakeSlug: scope.MakeSlug, ModelSlug: scope.ModelSlug, GeoSlug: scope.GeoSlug, SeenAt: scope.SeenAt},
 		})
@@ -187,6 +187,25 @@ func (c *Client) call(ctx context.Context, url string, payload []byte, out any) 
 		return fmt.Errorf("%s: HTTP %d: %s", url, resp.StatusCode, msg)
 	}
 	return json.Unmarshal(raw, out)
+}
+
+// RetryDelay is the pause before resending a batch the Worker answered 503.
+var RetryDelay = 3 * time.Second
+
+// postRetrying sends a batch, and once more after a 503: a Worker request that
+// ran out of CPU (Error 1102) has usually stored its listings already, so the
+// resend finds them known and is cheap. The ingest is idempotent.
+func (c *Client) postRetrying(ctx context.Context, body wireBody) (Stats, error) {
+	s, err := c.post(ctx, body)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 503") {
+		return s, err
+	}
+	select {
+	case <-ctx.Done():
+		return Stats{}, ctx.Err()
+	case <-time.After(RetryDelay):
+	}
+	return c.post(ctx, body)
 }
 
 func (c *Client) post(ctx context.Context, body wireBody) (Stats, error) {

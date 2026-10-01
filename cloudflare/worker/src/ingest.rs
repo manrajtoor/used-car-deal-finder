@@ -303,6 +303,19 @@ impl Planner {
 
     /// Statements for one listing (Go `upsert`). Listings without an id are skipped.
     pub fn plan(&mut self, l: &Value, scope: &Scope) -> Vec<Stmt> {
+        // An older listing a deep walk found (`compOnly`): stored and used as
+        // a comp, but never fresh, so it is neither rescored nor alerted on
+        // here (the crawler's first page holds the newest cars).
+        let comp_only = l.get("compOnly") == Some(&Value::Bool(true));
+        let fresh_before = self.fresh.len();
+        let out = self.plan_one(l, scope);
+        if comp_only {
+            self.fresh.truncate(fresh_before);
+        }
+        out
+    }
+
+    fn plan_one(&mut self, l: &Value, scope: &Scope) -> Vec<Stmt> {
         let Some(id) = listing_id(l).map(str::to_string) else {
             self.stats.skipped += 1;
             return Vec::new();
@@ -624,5 +637,17 @@ mod tests {
         let sql = update_sql();
         assert!(sql.contains("description = COALESCE(?"), "{sql}");
         assert!(sql.contains("page_read_at = COALESCE(?"), "{sql}");
+    }
+
+    #[test]
+    fn a_comp_only_listing_is_stored_but_never_fresh() {
+        let scope = Scope { seen_at: "2026-10-01T14:00:00.000Z".into(), ..Default::default() };
+        let mut p = Planner::new(HashMap::new());
+        let stmts = p.plan(&json!({"id": "old", "price": 9000, "compOnly": true}), &scope);
+        assert!(stmts[0].sql.starts_with("INSERT INTO listings"), "still stored");
+        assert_eq!(p.stats.added, 1);
+        assert!(p.fresh.is_empty(), "not rescored or alerted on");
+        p.plan(&json!({"id": "new", "price": 9000}), &scope);
+        assert_eq!(p.fresh, vec!["new"]);
     }
 }
