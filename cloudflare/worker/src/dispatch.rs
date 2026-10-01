@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 /// The cron expression that starts the Craigslist crawl (wrangler.toml [triggers]).
 pub const DISPATCH_CRON: &str = "*/5 * * * *";
 /// The cron expression that starts the Facebook-through-Apify run.
-pub const FACEBOOK_CRON: &str = "30 */2 * * *";
+pub const FACEBOOK_CRON: &str = "30 */4 * * *";
 
 /// Which workflow a cron starts: the var naming its file, and the
 /// `searches` input to pass (`None`: the workflow takes no inputs).

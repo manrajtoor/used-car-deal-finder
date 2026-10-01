@@ -26,8 +26,9 @@ import (
 // SourceName ("marketplace"): the same site, priced as the same sellers.
 const ApifySourceName = "marketplace-apify"
 
-// ResultsPerPage is how many cards one Marketplace search page carries.
-const ResultsPerPage = 24
+// ResultsPerPage is about how many cards one actor page returns (41 on
+// 2026-10-01; the site's own page shows 24). Used for the result cap.
+const ResultsPerPage = 45
 
 // ApifySource runs the actor for one search.
 type ApifySource struct {
