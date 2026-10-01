@@ -97,6 +97,15 @@ func TestApifySourceReadsTheNewestTristateCars(t *testing.T) {
 	}
 }
 
+func TestApifyInputLeavesOutUnsetLocation(t *testing.T) {
+	b, _ := json.Marshal(ActorInput{URLs: []string{"u"}, SortBy: "creation_time_descend"})
+	for _, k := range []string{"radiusKm", "latitude", "longitude", "location"} {
+		if strings.Contains(string(b), `"`+k+`"`) {
+			t.Errorf("%s sent as a zero value (the actor rejects radiusKm 0): %s", k, b)
+		}
+	}
+}
+
 func TestApifySourceStopsAtTheMonthlyBudget(t *testing.T) {
 	f := &fakeActor{monthly: 4.47}
 	srv := f.server(t)

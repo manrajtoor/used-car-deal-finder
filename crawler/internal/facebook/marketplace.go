@@ -105,24 +105,26 @@ type Proxy struct {
 // ActorInput is the actor's published input schema; field names are not
 // guesses (an earlier `startUrls` run "succeeded" returning one error object).
 type ActorInput struct {
-	URLs                []string `json:"urls"`
-	Location            string   `json:"location"`
-	Latitude            float64  `json:"latitude"`
-	Longitude           float64  `json:"longitude"`
-	RadiusKm            int      `json:"radiusKm"`
-	SortBy              string   `json:"sortBy"`
-	Proxy               Proxy    `json:"proxy"`
-	StrictFiltering     bool     `json:"strictFiltering"`
-	GetListingDetails   bool     `json:"getListingDetails"`
-	GetAllListingPhotos bool     `json:"getAllListingPhotos"`
-	MaxPagesPerURL      int      `json:"maxPagesPerUrl"`
-	MaxItems            int      `json:"maxItems"`
-	ResultsLimit        int      `json:"resultsLimit"`
-	DaysSinceListed     *string  `json:"daysSinceListed,omitempty"`
-	MinPrice            *int     `json:"minPrice,omitempty"`
-	MaxPrice            *int     `json:"maxPrice,omitempty"`
-	OnlyNewListings     bool     `json:"onlyNewListings,omitempty"`
-	CacheStorageID      string   `json:"cacheStorageId,omitempty"`
+	URLs []string `json:"urls"`
+	// Zero values are left out: the actor validates radiusKm >= 1, and with
+	// URLs it ignores the location fields anyway.
+	Location            string  `json:"location,omitempty"`
+	Latitude            float64 `json:"latitude,omitempty"`
+	Longitude           float64 `json:"longitude,omitempty"`
+	RadiusKm            int     `json:"radiusKm,omitempty"`
+	SortBy              string  `json:"sortBy"`
+	Proxy               Proxy   `json:"proxy"`
+	StrictFiltering     bool    `json:"strictFiltering"`
+	GetListingDetails   bool    `json:"getListingDetails"`
+	GetAllListingPhotos bool    `json:"getAllListingPhotos"`
+	MaxPagesPerURL      int     `json:"maxPagesPerUrl"`
+	MaxItems            int     `json:"maxItems"`
+	ResultsLimit        int     `json:"resultsLimit"`
+	DaysSinceListed     *string `json:"daysSinceListed,omitempty"`
+	MinPrice            *int    `json:"minPrice,omitempty"`
+	MaxPrice            *int    `json:"maxPrice,omitempty"`
+	OnlyNewListings     bool    `json:"onlyNewListings,omitempty"`
+	CacheStorageID      string  `json:"cacheStorageId,omitempty"`
 }
 
 // BuildActorInput fills the actor input.
