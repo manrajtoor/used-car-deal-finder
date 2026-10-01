@@ -49,7 +49,7 @@ const TokenEnv = "CARBUYER_INGEST_TOKEN"
 
 const help = `carbuyer — search used-car sites, store, and score
 
-  --source <site>       autohebdo (default) | kijiji | lespac | facebook |
+  --source <site>       autohebdo (default) | kijiji | lespac | facebook | facebook-apify |
                         craigslist | cargurus
   --make <slug>         e.g. toyota (autohebdo, facebook; kijiji refuses it)
   --model <slug>        e.g. rav4 (requires --make)

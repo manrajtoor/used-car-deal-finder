@@ -33,7 +33,8 @@ migrations_dir = "../d1/migrations"
 # Every 5 minutes: start the GitHub Actions crawl (src/dispatch.rs); GitHub's
 # own `schedule:` is best effort and often skips a 5-minute slot.
 [triggers]
-crons = ["0 11 * * *", "*/5 * * * *"]
+# Every 2 hours at :30: start the Facebook-through-Apify run (facebook.yml).
+crons = ["0 11 * * *", "*/5 * * * *", "30 */2 * * *"]
 
 [vars]
 # The crawl this Worker starts every 5 minutes (src/dispatch.rs). The token is
@@ -41,6 +42,7 @@ crons = ["0 11 * * *", "*/5 * * * *"]
 # repository only, Actions: read and write). Without it the cron only logs.
 GITHUB_REPO = "manrajtoor/used-car-deal-finder"
 GITHUB_WORKFLOW = "crawl.yml"
+GITHUB_WORKFLOW_FACEBOOK = "facebook.yml"
 # Scorer minComps used by the cron job and by /api/deals when the request has
 # no ?minComps=. Empty = the scorer default (8 comparable cars per bucket).
 DEFAULT_MIN_COMPS = ""

@@ -1,0 +1,22 @@
+# Facebook Marketplace through Apify (source facebook-apify), run by
+# .github/workflows/facebook.yml every 2 hours. Marketplace blocks cloud IPs,
+# so the actor fetches from residential exits and bills per result.
+#
+# Sized for Apify's Free plan ($5 a month): one page per run, the 24 newest
+# cars listed in the last day, without listing details ($0.50 per 1 000):
+# 12 runs a day x 24 = ~290 results, ~$4.30 a month. Every run first checks
+# the month's Apify spend and skips once it reaches $4.50. The tri-state posts
+# ~1 700 cars a day, so this sees the freshest ~1 in 6.
+
+delaySeconds: 3
+
+defaults:
+  seller: any
+  minPrice: 1000     # USD; below this are placeholders ("$1", "$2 000 2024 Civic")
+  maxPrice: 30000
+  pages: 1           # 24 results; each page costs ~$0.012
+  newest: true
+
+searches:
+  - source: facebook-apify   # the one "nyc" Marketplace place covers NY, NJ, CT
+    geo: tristate

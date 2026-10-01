@@ -29,8 +29,10 @@ const (
 )
 
 // Sources are the sites a search can walk, by the name stored in
-// listings.source. "facebook" is accepted as another name for "marketplace".
-var Sources = []string{"autohebdo", "kijiji", "lespac", "marketplace", "craigslist", "cargurus"}
+// listings.source. "facebook" is accepted as another name for "marketplace",
+// and "facebook-apify" for "marketplace-apify" (Marketplace through Apify,
+// stored as "marketplace" too).
+var Sources = []string{"autohebdo", "kijiji", "lespac", "marketplace", "marketplace-apify", "craigslist", "cargurus"}
 
 // SourceName resolves a configured source name ("" means autohebdo).
 func SourceName(s string) (string, error) {
@@ -40,6 +42,8 @@ func SourceName(s string) (string, error) {
 		return "autohebdo", nil
 	case "facebook":
 		return "marketplace", nil
+	case "facebook-apify":
+		return "marketplace-apify", nil
 	}
 	for _, known := range Sources {
 		if s == known {

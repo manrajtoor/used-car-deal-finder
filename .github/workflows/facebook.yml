@@ -1,0 +1,54 @@
+# Facebook Marketplace through Apify (crawler/searches-apify.yml), pushed to
+# the same Worker as the Craigslist crawl. No schedule here: the Worker's
+# "30 */2 * * *" cron starts it (cloudflare/worker/src/dispatch.rs), every
+# 2 hours. Sized for Apify's Free plan; see searches-apify.yml.
+#
+# Setup: repository secret APIFY_TOKEN (console.apify.com > Settings > API).
+name: facebook
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: facebook
+  cancel-in-progress: false
+
+jobs:
+  facebook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: crawler
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: crawler/go.mod
+          cache-dependency-path: crawler/go.sum
+
+      - name: Check configuration
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          CARBUYER_INGEST_TOKEN: ${{ secrets.CARBUYER_INGEST_TOKEN }}
+          CARBUYER_API_URL: ${{ vars.CARBUYER_API_URL }}
+        run: |
+          [ -n "$APIFY_TOKEN" ] || { echo "::error::repository secret APIFY_TOKEN is not set"; exit 1; }
+          [ -n "$CARBUYER_INGEST_TOKEN" ] || { echo "::error::repository secret CARBUYER_INGEST_TOKEN is not set"; exit 1; }
+          case "$CARBUYER_API_URL" in https://*) ;; *) echo "::error::CARBUYER_API_URL must be set and start with https://"; exit 1;; esac
+
+      - name: Build the crawler
+        run: go build -trimpath -o "$RUNNER_TEMP/carbuyer" ./cmd/carbuyer
+
+      - name: Fetch through Apify and push
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          CARBUYER_INGEST_TOKEN: ${{ secrets.CARBUYER_INGEST_TOKEN }}
+          CARBUYER_API_URL: ${{ vars.CARBUYER_API_URL }}
+        run: |
+          "$RUNNER_TEMP/carbuyer" --searches searches-apify.yml --no-score \
+            --db "$RUNNER_TEMP/carbuyer.db" --push "$CARBUYER_API_URL"

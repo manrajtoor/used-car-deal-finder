@@ -85,7 +85,7 @@ func TestParseErrors(t *testing.T) {
 
 // The files shipped in the repo must always load.
 func TestShippedSearchesFile(t *testing.T) {
-	for _, name := range []string{"searches.yml", "searches-facebook.yml"} {
+	for _, name := range []string{"searches.yml", "searches-facebook.yml", "searches-apify.yml"} {
 		plan, err := Load(filepath.Join("..", "..", name))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)

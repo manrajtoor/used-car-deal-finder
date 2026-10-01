@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"carbuyer/crawler/internal/autohebdo"
@@ -101,6 +102,15 @@ func (k *sourceKit) build(ctx context.Context, name string) (source.Source, erro
 			opts = append(opts, craigslist.WithMaxFeedRequests(1))
 		}
 		return craigslist.New(f, opts...), nil
+	case "marketplace-apify":
+		return &facebook.ApifySource{
+			Token: os.Getenv("APIFY_TOKEN"),
+			Match: func(title, desc string) facebook.Vehicle {
+				m := match(title, desc)
+				return facebook.Vehicle{Make: m.Make, Model: m.Model, Year: m.Year}
+			},
+			Log: func(line string) { fmt.Fprintln(os.Stderr, line) },
+		}, nil
 	case "marketplace":
 		// Newest first is the only sort, in $10 000 bands: a request budget
 		// (`pages`; the shipped searches.yml keeps it at 3) takes the plan in

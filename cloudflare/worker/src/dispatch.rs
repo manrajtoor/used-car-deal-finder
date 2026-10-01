@@ -17,8 +17,20 @@
 
 use serde_json::{json, Value};
 
-/// The cron expression that means "start a crawl" (wrangler.toml [triggers]).
+/// The cron expression that starts the Craigslist crawl (wrangler.toml [triggers]).
 pub const DISPATCH_CRON: &str = "*/5 * * * *";
+/// The cron expression that starts the Facebook-through-Apify run.
+pub const FACEBOOK_CRON: &str = "30 */2 * * *";
+
+/// Which workflow a cron starts: the var naming its file, and the
+/// `searches` input to pass (`None`: the workflow takes no inputs).
+pub fn target(cron: &str) -> Option<(&'static str, Option<&'static str>)> {
+    match cron {
+        DISPATCH_CRON => Some(("GITHUB_WORKFLOW", Some("searches.yml"))),
+        FACEBOOK_CRON => Some(("GITHUB_WORKFLOW_FACEBOOK", None)),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DispatchConfig {
@@ -27,10 +39,24 @@ pub struct DispatchConfig {
     pub workflow: String,
     /// Branch the workflow runs on.
     pub git_ref: String,
+    /// The workflow's `searches` input, if it has one.
+    pub searches: Option<String>,
 }
 
 impl DispatchConfig {
-    /// `None` unless the token, a well-formed "owner/name" and a workflow are set.
+    /// `None` unless the token, a well-formed "owner/name" and the workflow
+    /// named by `workflow_var` are set.
+    pub fn for_workflow(
+        get: impl Fn(&str) -> Option<String>,
+        workflow_var: &str,
+        searches: Option<&str>,
+    ) -> Option<DispatchConfig> {
+        let mut c = Self::from_vars(|k| if k == "GITHUB_WORKFLOW" { get(workflow_var) } else { get(k) })?;
+        c.searches = searches.map(str::to_string);
+        Some(c)
+    }
+
+    /// The Craigslist crawl's config: `GITHUB_WORKFLOW`, `searches.yml`.
     pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> Option<DispatchConfig> {
         let val = |k: &str| get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
         let repo = val("GITHUB_REPO")?;
@@ -52,6 +78,7 @@ impl DispatchConfig {
             repo,
             workflow,
             git_ref: val("GITHUB_REF").unwrap_or_else(|| "main".to_string()),
+            searches: Some("searches.yml".to_string()),
         })
     }
 
@@ -71,9 +98,13 @@ impl DispatchConfig {
         ]
     }
 
-    /// The workflow's one input, given explicitly rather than trusting its default.
+    /// The ref, and the `searches` input when the workflow has one (given
+    /// explicitly rather than trusting its default).
     pub fn body(&self) -> Value {
-        json!({ "ref": self.git_ref, "inputs": { "searches": "searches.yml" } })
+        match &self.searches {
+            Some(s) => json!({ "ref": self.git_ref, "inputs": { "searches": s } }),
+            None => json!({ "ref": self.git_ref }),
+        }
     }
 }
 
@@ -132,6 +163,21 @@ mod tests {
         assert!(h.contains(&("Authorization", "Bearer tok".to_string())));
         assert!(h.iter().any(|(k, _)| *k == "User-Agent"));
         assert_eq!(c.body(), json!({"ref": "main", "inputs": {"searches": "searches.yml"}}));
+    }
+
+    #[test]
+    fn each_cron_starts_its_own_workflow() {
+        assert_eq!(target(DISPATCH_CRON), Some(("GITHUB_WORKFLOW", Some("searches.yml"))));
+        assert_eq!(target(FACEBOOK_CRON), Some(("GITHUB_WORKFLOW_FACEBOOK", None)));
+        assert_eq!(target("0 11 * * *"), None, "the daily snapshot is not a dispatch");
+        let get = |k: &str| match k {
+            "GITHUB_WORKFLOW_FACEBOOK" => Some("facebook.yml".to_string()),
+            _ => vars(k),
+        };
+        let fb = DispatchConfig::for_workflow(get, "GITHUB_WORKFLOW_FACEBOOK", None).unwrap();
+        assert!(fb.url().ends_with("/actions/workflows/facebook.yml/dispatches"));
+        assert_eq!(fb.body(), json!({"ref": "main"}), "facebook.yml takes no inputs");
+        assert!(DispatchConfig::for_workflow(vars, "GITHUB_WORKFLOW_FACEBOOK", None).is_none(), "unset var: off");
     }
 
     #[test]

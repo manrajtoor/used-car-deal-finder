@@ -261,7 +261,10 @@ func (a *apify) server(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		a.tokens = append(a.tokens, r.URL.Query().Get("token"))
+		a.tokens = append(a.tokens, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		if r.URL.Query().Get("token") != "" {
+			a.tokens = append(a.tokens, "LEAKED-IN-URL")
+		}
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/abort"):
 			a.aborted++
@@ -378,13 +381,18 @@ func TestRunActor(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	t.Run("token is query-escaped", func(t *testing.T) {
+	t.Run("the token travels in a header, never the URL", func(t *testing.T) {
 		a := &apify{poll: func(int) string { return `{"data":{"status":"SUCCEEDED"}}` }, dataset: `[]`}
 		if _, err := runWith(a.server(t), ActorRun{MaxItems: 10, Token: "a&b c"}); err != nil {
 			t.Fatal(err)
 		}
-		if a.tokens[0] != "a&b c" {
-			t.Errorf("token arrived as %q", a.tokens[0])
+		if len(a.tokens) == 0 || a.tokens[0] != "a&b c" {
+			t.Errorf("tokens = %q", a.tokens)
+		}
+		for _, tok := range a.tokens {
+			if tok == "LEAKED-IN-URL" {
+				t.Error("token sent in the query string")
+			}
 		}
 	})
 }

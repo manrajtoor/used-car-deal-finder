@@ -211,11 +211,11 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
 }
 
-/// The every-5-minutes cron: ask GitHub to start the crawl (`dispatch.rs`).
-async fn dispatch_crawl(env: &Env) {
+/// A dispatch cron: ask GitHub to start that cron's workflow (`dispatch.rs`).
+async fn dispatch_crawl(env: &Env, workflow_var: &str, searches: Option<&str>) {
     let get = |k: &str| env.secret(k).ok().map(|v| v.to_string()).or_else(|| env.var(k).ok().map(|v| v.to_string()));
-    let Some(cfg) = DispatchConfig::from_vars(get) else {
-        console_log!("crawl dispatch: off (GITHUB_DISPATCH_TOKEN, GITHUB_REPO or GITHUB_WORKFLOW not set)");
+    let Some(cfg) = DispatchConfig::for_workflow(get, workflow_var, searches) else {
+        console_log!("crawl dispatch: off (GITHUB_DISPATCH_TOKEN, GITHUB_REPO or {workflow_var} not set)");
         return;
     };
     let result = async {
@@ -244,8 +244,8 @@ async fn dispatch_crawl(env: &Env) {
 
 #[event(scheduled)]
 async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    if event.cron() == dispatch::DISPATCH_CRON {
-        dispatch_crawl(&env).await;
+    if let Some((workflow_var, searches)) = dispatch::target(&event.cron()) {
+        dispatch_crawl(&env, workflow_var, searches).await;
         return;
     }
     let db = match store(&env) {

@@ -33,12 +33,21 @@ const Actor = "curious_coder~facebook-marketplace"
 // ApifyBase is the Apify API root.
 const ApifyBase = "https://api.apify.com/v2"
 
-// CostPer1000 is the actor's published price. Used only to warn, never to bill.
-const CostPer1000 = 1.5
+// CostPer1000 is the actor's published price with listing details, and
+// BasicCostPer1000 without (checked 2026-10-01). Used only to warn, never to bill.
+const (
+	CostPer1000      = 1.5
+	BasicCostPer1000 = 0.5
+)
 
-// EstimateCost is the dollar cost of n results, to the cent.
+// EstimateCost is the dollar cost of n detailed results, to the cent.
 func EstimateCost(n int) float64 {
 	return jsRound(float64(n)/1000*CostPer1000*100) / 100
+}
+
+// EstimateBasicCost is the dollar cost of n results without details.
+func EstimateBasicCost(n int) float64 {
+	return jsRound(float64(n)/1000*BasicCostPer1000*100) / 100
 }
 
 // MarketplaceURLOptions is a hand-pinned vehicle search. Nil values are left out.
@@ -203,7 +212,11 @@ func RunActor(ctx context.Context, r ActorRun) (ActorResult, error) {
 	if r.Token == "" {
 		return ActorResult{}, fmt.Errorf("APIFY_TOKEN is not set: get one from console.apify.com and put it in .env")
 	}
-	if est := EstimateCost(r.MaxItems); est > r.MaxCost {
+	estimate := EstimateCost
+	if r.Input != nil && !r.Input.GetListingDetails {
+		estimate = EstimateBasicCost
+	}
+	if est := estimate(r.MaxItems); est > r.MaxCost {
 		return ActorResult{}, fmt.Errorf("refusing to start: %d items would cost about $%s, over the $%s ceiling. "+
 			"Raise maxCost deliberately or lower maxItems.", r.MaxItems, jstext.Number(est), jstext.Number(r.MaxCost))
 	}
@@ -233,8 +246,8 @@ func RunActor(ctx context.Context, r ActorRun) (ActorResult, error) {
 		input = &in
 	}
 	body, _ := json.Marshal(input)
-	token := "token=" + formEscape(r.Token)
-
+	// The token goes in a header, never the URL: Go's HTTP errors quote the
+	// URL, so a token in the query string would land in CI logs.
 	do := func(method, url string, payload []byte) (int, []byte, error) {
 		var rd io.Reader
 		if payload != nil {
@@ -247,6 +260,7 @@ func RunActor(ctx context.Context, r ActorRun) (ActorResult, error) {
 		if payload != nil {
 			req.Header.Set("content-type", "application/json")
 		}
+		req.Header.Set("Authorization", "Bearer "+r.Token)
 		resp, err := client.Do(req)
 		if err != nil {
 			return 0, nil, err
@@ -257,7 +271,9 @@ func RunActor(ctx context.Context, r ActorRun) (ActorResult, error) {
 	}
 	ok := func(status int) bool { return status >= 200 && status < 300 }
 
-	status, b, err := do(http.MethodPost, base+"/acts/"+Actor+"/runs?"+token, body)
+	// maxTotalChargeUsd makes Apify itself stop billing at the ceiling; the
+	// polling check below is a second guard.
+	status, b, err := do(http.MethodPost, base+"/acts/"+Actor+"/runs?maxTotalChargeUsd="+strconv.FormatFloat(r.MaxCost, 'f', 2, 64), body)
 	if err != nil {
 		return ActorResult{}, err
 	}
@@ -273,7 +289,7 @@ func RunActor(ctx context.Context, r ActorRun) (ActorResult, error) {
 	run := start.Data
 
 	abort := func(why string) error {
-		_, _, _ = do(http.MethodPost, base+"/actor-runs/"+run.ID+"/abort?"+token, nil)
+		_, _, _ = do(http.MethodPost, base+"/actor-runs/"+run.ID+"/abort", nil)
 		return fmt.Errorf("Apify run %s aborted: %s", run.ID, why)
 	}
 
@@ -284,7 +300,7 @@ func RunActor(ctx context.Context, r ActorRun) (ActorResult, error) {
 			return ActorResult{}, abort(fmt.Sprintf("still %s after %dms", state, timeout.Milliseconds()))
 		}
 		sleep(poll)
-		status, b, err := do(http.MethodGet, base+"/actor-runs/"+run.ID+"?"+token, nil)
+		status, b, err := do(http.MethodGet, base+"/actor-runs/"+run.ID, nil)
 		if err != nil {
 			return ActorResult{}, err
 		}
@@ -313,7 +329,7 @@ func RunActor(ctx context.Context, r ActorRun) (ActorResult, error) {
 		return ActorResult{}, fmt.Errorf("Apify run %s finished as %s", run.ID, state)
 	}
 
-	status, b, err = do(http.MethodGet, base+"/actor-runs/"+run.ID+"/dataset/items?"+token+"&clean=true", nil)
+	status, b, err = do(http.MethodGet, base+"/actor-runs/"+run.ID+"/dataset/items?clean=true", nil)
 	if err != nil {
 		return ActorResult{}, err
 	}
@@ -556,6 +572,31 @@ func NormalizeMarketplace(raw map[string]any, match Matcher) Item {
 		}
 	}
 
+	// Without listing details the odometer is only in the card's subtitle
+	// ("51K miles · Dealership"); with them, vehicle_odometer_data is exact.
+	// Odometer data on US listings is miles too.
+	subtitle := ""
+	if subs, ok := raw["custom_sub_titles_with_rendering_flags"].([]any); ok {
+		for _, sub := range subs {
+			if t, ok := at(sub, "subtitle").(string); ok {
+				subtitle += " · " + t
+			}
+		}
+	}
+	km := parseInteger(coalesce(raw["odometer"], raw["mileage"]))
+	if v := parseInteger(at(raw, "vehicle_odometer_data", "value")); v != nil {
+		km = v
+		if at(raw, "vehicle_odometer_data", "unit") == "MILES" {
+			km = listing.Num(jsRound(*v * kmPerMile))
+		}
+	} else if km == nil && subtitle != "" {
+		km = ParseMileage(&subtitle)
+	}
+	sellerType := "PrivateSeller"
+	if strings.Contains(strings.ToLower(subtitle), "dealership") {
+		sellerType = "Dealer"
+	}
+
 	var listedAt *string
 	if c := raw["creation_time"]; truthy(c) {
 		if sec, ok := c.(float64); ok {
@@ -578,14 +619,14 @@ func NormalizeMarketplace(raw map[string]any, match Matcher) Item {
 			Model:        vehicle.Model,
 			Year:         vehicle.Year,
 			TrimText:     &title,
-			Km:           parseInteger(coalesce(at(raw, "vehicle_odometer_data", "value"), raw["odometer"], raw["mileage"])),
+			Km:           km,
 			Transmission: strPtr(raw["vehicle_transmission_type"]),
 			Fuel:         strPtr(raw["vehicle_fuel_type"]),
 			// Marketplace's apparent discount is mostly disclosed defects.
 			IsDamaged:   damage.IsDamaged,
 			IsParts:     damage.IsParts,
 			Condition:   listing.Str("U"),
-			SellerType:  listing.Str("PrivateSeller"),
+			SellerType:  listing.Str(sellerType),
 			SellerID:    strPtr(at(raw, "marketplace_listing_seller", "id")),
 			SellerName:  strPtr(at(raw, "marketplace_listing_seller", "name")),
 			City:        strPtr(coalesce(geo["city"], at(geo, "city_page", "display_name"), at(raw, "location_text", "text"))),
